@@ -1,0 +1,13 @@
+# Change region or other defaults in project {config/projectfolder/config}
+# root directory by creating a config.yaml that overrides the default in the config/config.yaml
+
+template_bucket_name: codepipeline-template-bucket-us-east-1
+profile: iamadmin-production
+template_key_prefix: prod
+codepipeline_kms_key_arn-ca-central-1: arn:aws:kms:ca-central-1:524029157231:key/9bc4e7a8-ceba-4724-a390-66d73f077545
+codepipeline_kms_key_arn-us-east-1: arn:aws:kms:us-east-1:524029157231:key/acd6dcbb-cce9-4732-a748-3777a946b9c4
+codepipeline_artifact_bucket-ca-central-1: codepipeline-ca-cental-1-524029157231
+codepipeline_artifact_bucket-us-east-1: codepipeline-us-east-1-524029157231
+environment: Prod
+account: "524029157231"
+region: us-east-1

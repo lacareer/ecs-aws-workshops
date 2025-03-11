@@ -1,0 +1,11 @@
+project_code: chuks-sceptre-devops
+template_bucket_name: codepipeline-template-bucket-ca-central-1
+profile: iamadmin-general
+template_key_prefix: Dev
+codepipeline_kms_key_arn-ca-central-1: arn:aws:kms:ca-central-1:066638479762:key/2d3f58c9-8dfb-4430-9780-f59fa99ac25a
+codepipeline_kms_key_arn-us-east-1: arn:aws:kms:us-east-1:066638479762:key/61b2498a-a39b-477d-a742-a49e1dcf59c6
+codepipeline_artifact_bucket_ca_central_1: codepipeline-ca-central-1-066638479762
+codepipeline_artifact_bucket_us_east_1: codepipeline-us-east-1-066638479762
+environment: Dev
+account: "066638479762"
+region: ca-central-1
