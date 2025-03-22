@@ -1,0 +1,69 @@
+{
+    "family": "retail-store-ecs-catalog",
+    "executionRoleArn": "arn:aws:iam::066638479762:role/ecs-execution-role",
+    "taskRoleArn": "arn:aws:iam::066638479762:role/ecs-task-role",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "1024",
+    "memory": "2048",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "containerDefinitions": [
+        {
+            "name": "application",
+            "image": "066638479762.dkr.ecr.us-east-1.amazonaws.com/retail-store-sample-catalog:latest",
+            "portMappings": [
+                {
+                    "name": "application",
+                    "containerPort": 8080,
+                    "hostPort": 8080,
+                    "protocol": "tcp",
+                    "appProtocol": "http"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {
+                    "name": "DB_NAME",
+                    "value": "catalog"
+                }
+            ],
+            "secrets": [
+                {
+                    "name": "DB_ENDPOINT",
+                    "valueFrom": "arn:aws:ssm:us-east-1:066638479762:parameter/retail-store-ecs/catalog/db-endpoint"
+                },
+                {
+                    "name": "DB_PASSWORD",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:066638479762:secret:retail-store-ecs-catalog-db-VwCAYr"
+                },
+                {
+                    "name": "DB_USER",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:066638479762:secret:retail-store-ecs-catalog-db-VwCAYr"
+                }
+            ],
+            "healthCheck": {
+                "command": [
+                    "CMD-SHELL",
+                    "curl -f http://localhost:8080/health || exit 1"
+                ],
+                "interval": 10,
+                "timeout": 5,
+                "retries": 3,
+                "startPeriod": 60
+            },
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "retail-store-ecs-tasks",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "catalog-service"
+                }
+            }
+        }
+    ]
+}
