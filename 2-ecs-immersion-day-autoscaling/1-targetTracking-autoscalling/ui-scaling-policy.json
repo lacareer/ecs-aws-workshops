@@ -1,7 +1,0 @@
-{
-    "TargetValue": 1500,
-    "PredefinedMetricSpecification": {
-        "PredefinedMetricType": "ALBRequestCountPerTarget",
-        "ResourceLabel": "app/ws-ecs-alb/ef429c628a78387e/targetgroup/ws-ecs-tg/5f4b052b224a702f"
-    }
-}
