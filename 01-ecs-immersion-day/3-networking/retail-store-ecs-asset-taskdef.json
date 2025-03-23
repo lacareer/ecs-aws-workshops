@@ -1,0 +1,50 @@
+{
+    "family": "retail-store-ecs-assets",
+    "executionRoleArn": "arn:aws:iam::066638479762:role/ecs-execution-role",
+    "taskRoleArn": "arn:aws:iam::066638479762:role/ecs-task-role",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "1024",
+    "memory": "2048",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "containerDefinitions": [
+        {
+            "name": "application",
+            "image": "066638479762.dkr.ecr.us-east-1.amazonaws.com/retail-store-sample-assets:latest",
+            "cpu": 0,
+            "portMappings": [
+                {
+                    "name": "application",
+                    "containerPort": 8080,
+                    "hostPort": 8080,
+                    "protocol": "tcp",
+                    "appProtocol": "http"
+                }
+            ],
+            "essential": true,
+            "healthCheck": {
+                "command": [
+                    "CMD-SHELL",
+                    "curl -f http://localhost:8080/health.html || exit 1"
+                ],
+                "interval": 10,
+                "timeout": 5,
+                "retries": 3,
+                "startPeriod": 60
+            },
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "retail-store-ecs-tasks",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "assets-service"
+                }
+            }
+        }
+    ]
+}
