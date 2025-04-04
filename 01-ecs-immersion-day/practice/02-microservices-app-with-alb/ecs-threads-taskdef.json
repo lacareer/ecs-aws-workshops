@@ -1,0 +1,43 @@
+{
+    "family": "ecs-nodejs-threads",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "1024",
+    "memory": "2048",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "containerDefinitions": [
+        {
+            "name": "application",
+            "image": "066638479762.dkr.ecr.us-east-1.amazonaws.com/ecs-nodejs-microservices-threads:latest",
+            "portMappings": [
+                {
+                    "name": "application",
+                    "containerPort": 3000,
+                    "hostPort": 3000,
+                    "protocol": "tcp",
+                    "appProtocol": "http"
+                }
+            ],
+            "essential": true,
+            "linuxParameters": {
+                "initProcessEnabled": true
+            },          
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-create-group": "true",
+                    "awslogs-group": "ecs-nodejs-threads",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "ecs-nodejs-service"
+                }
+            }
+        }
+    ],
+    "executionRoleArn": "arn:aws:iam::066638479762:role/ecs-execution-role",
+    "taskRoleArn": "arn:aws:iam::066638479762:role/ecs-task-role"
+}

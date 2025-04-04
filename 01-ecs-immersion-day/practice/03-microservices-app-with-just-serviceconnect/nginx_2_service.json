@@ -1,0 +1,57 @@
+
+{
+    "cluster": "nginx_cluster",
+    "deploymentConfiguration": {
+        "maximumPercent": 200,
+        "minimumHealthyPercent": 0
+    },
+    "deploymentController": {
+        "type": "ECS"
+    },
+    "desiredCount": 1,
+    "enableECSManagedTags": true,
+    "enableExecuteCommand": true,
+    "launchType": "FARGATE",
+    "networkConfiguration": {
+        "awsvpcConfiguration": {
+            "assignPublicIp": "ENABLED",
+            "securityGroups": [
+                "sg-0f1ea858b0b0b5478"
+            ],
+            "subnets": [
+                "subnet-0966d0570f9f4ba4b",
+                "subnet-0343eaef6ad4d3d19"
+            ]
+           }
+    },
+    "platformVersion": "LATEST",
+    "propagateTags": "SERVICE",
+    "serviceName": "nginx_2_service",
+    "serviceConnectConfiguration": {
+        "enabled": true,
+        "namespace": "nginx_cluster",
+        "services": [
+            {
+                "portName": "nginx",
+                "discoveryName": "nginx_2",
+                "clientAliases": [
+                    {
+                        "port": 80,
+                        "dnsName": "nginx_2"
+                    }
+                ]
+            }
+        ],
+        "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-create-group": "true",
+                "awslogs-group": "nginx_service",
+                "awslogs-region": "us-east-1",
+                "awslogs-stream-prefix": "nginx_service_2"
+            }
+        }
+    },
+    "taskDefinition": "nginx_2"
+}
+                        

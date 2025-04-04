@@ -1,0 +1,41 @@
+
+{
+    "family": "nginx_2",
+    "executionRoleArn": "arn:aws:iam::066638479762:role/ecs-execution-role",
+    "taskRoleArn": "arn:aws:iam::066638479762:role/ecs-task-role",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "1024",
+    "memory": "2048",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "containerDefinitions": [
+        {
+        "name": "nginx_2",
+        "image": "public.ecr.aws/docker/library/nginx:latest",
+        "portMappings": [
+            {
+                "name": "nginx",
+                "containerPort": 80,
+                "protocol": "tcp", 
+                "appProtocol": "http"
+            }
+        ],
+        "essential": true,
+        "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-create-group": "true",
+                "awslogs-group": "nginx_task",
+                "awslogs-region": "us-east-1",
+                "awslogs-stream-prefix": "nginx_task_2"
+            }
+        }
+        }
+    ]
+}
+                        

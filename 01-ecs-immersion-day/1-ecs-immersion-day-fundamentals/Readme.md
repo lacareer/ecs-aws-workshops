@@ -100,7 +100,7 @@ This command will display the full details of the task definition you just creat
 
 1a. Using the AWS console create an ALB SG (named: ec2+alb-sg) that allows inbound traffic on port 80, 22, 443, from the your IP and allows all outbound traffic
 
-1b. Using the AWS console create an ECS Service SG (ecs-sg) that allows inbound traffic from ALB SG and allows all outbound traffic
+1b. Using the AWS console create an ECS Service SG (ecs-sg) that allows inbound traffic from ALB SG, the VPC security (used for service connect, inter-communication of containers in the VPC, from lab 2/3 in practice directory) and allows all outbound traffic
 
 1. Using the AWS console add an inbound rule to th SG in  step 1a (ec2+alb-sg) that allows inbound traffic on port 8080 from thee ECS SG (ecs-sg)
 
@@ -112,7 +112,7 @@ This command will display the full details of the task definition you just creat
 
 An ECS service enables you to run and maintain a specified number of instances of a task definition simultaneously in an Amazon ECS cluster. If any of these tasks fail or stop for any reason, the ECS service scheduler launches another instance of your task definition to replace it, maintaining the desired number of tasks in the service. This ensures high availability for your application.
 
-ECS services are used to manage long-running applications, microservices, or other software components that require high availability. Services in ECS can be integrated with Elastic Load Balancing (ELB) to distribute traffic evenly across the tasks in the service, providing a seamless way to deploy, manage, and scale your containerized applications. Let's create the ECS service (where UI_SG_ID is the SG ID of 'ecs-sg', and PRIVATE_SUBNET1 and PRIVATE_SUBNET2 are private subnets in my account in  us-east-1 region, all taken from the console ):
+ECS services are used to manage long-running applications, microservices, or other software components that require high availability. Services in ECS can be integrated with Elastic Load Balancing (ELB) to distribute traffic evenly across the tasks in the service, providing a seamless way to deploy, manage, and scale your containerized applications. Let's create the ECS service (where UI_SG_ID is the SG ID of 'ecs-sg', and PRIVATE_SUBNET1 and PRIVATE_SUBNET2 are private subnets in my account in  us-east-1 region in my custom VPC, all taken from the console ):
 
 -$ export AWS_REGION="us-east-1"
 
