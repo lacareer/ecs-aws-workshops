@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id'
+  ECSInstanceRole:
+    Type: String
+    Default: "ecsInstanceRole"
+Resources:
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: "t3.medium"
+        IamInstanceProfile: 
+          Name: !Ref ECSInstanceRole
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash -xe
+            echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+  AutoScalingGroup1:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AvailabilityZones:
+        Fn::GetAZs: !Ref "AWS::Region"
+      HealthCheckGracePeriod: 60
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      NewInstancesProtectedFromScaleIn: true
+      MaxSize: "10"
+      MinSize: "0"
+      DesiredCapacity: "0"
+  AutoScalingGroup2:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      AvailabilityZones:
+        Fn::GetAZs: !Ref "AWS::Region"
+      HealthCheckGracePeriod: 60
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      NewInstancesProtectedFromScaleIn: true
+      MaxSize: "10"
+      MinSize: "0"
+      DesiredCapacity: "0"
+  CapacityProvider1:
+    Type: "AWS::ECS::CapacityProvider"
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref AutoScalingGroup1
+        ManagedScaling:
+          Status: ENABLED
+        ManagedTerminationProtection: ENABLED
+  CapacityProvider2:
+    Type: "AWS::ECS::CapacityProvider"
+    Properties:
+      AutoScalingGroupProvider:
+        AutoScalingGroupArn: !Ref AutoScalingGroup2
+        ManagedScaling:
+          Status: ENABLED
+        ManagedTerminationProtection: ENABLED
+  ECSCluster:
+    Type: 'AWS::ECS::Cluster'
+  ClusterCPAssociation:
+    Type: "AWS::ECS::ClusterCapacityProviderAssociations"
+    Properties:
+      Cluster: !Ref ECSCluster
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+        - !Ref CapacityProvider1
+        - !Ref CapacityProvider2
+      DefaultCapacityProviderStrategy:
+          - CapacityProvider: FARGATE
+            Base: 1
+            Weight: 0
+          - CapacityProvider: FARGATE_SPOT
+            Weight: 1
+  ECSTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities:
+        - "EC2"
+      Cpu: '512'
+      Memory: '1024'
+      ContainerDefinitions:
+        - Name: "CapacityProvidersDemo"
+          Image: public.ecr.aws/nginx/nginx:latest
+          PortMappings:
+            - ContainerPort: 80
+  ECSDemoService: 
+    Type: AWS::ECS::Service
+    Properties: 
+      Cluster: !Ref ECSCluster
+      DesiredCount: 5
+      TaskDefinition: !Ref ECSTaskDefinition
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref CapacityProvider1
+          Base: 1
+          Weight: 1
+        - CapacityProvider: !Ref CapacityProvider2
+          Weight: 1

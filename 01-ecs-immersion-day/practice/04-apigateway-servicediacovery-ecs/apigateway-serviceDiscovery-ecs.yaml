@@ -1,0 +1,583 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT
+
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Demo of an AWS Fargate cluster hosting APIs exposed through API Gateway.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: ecsapi-demo
+    Description: "A friendly environment name that will be used for namespacing all cluster resources. Example: staging, qa, or production"
+  PrivateDNSNamespaceName:
+    Type: String
+    Default: service
+    Description: "The private DNS name that identifies the name that you want to use to locate your resources"
+  MinContainersFoodstoreFoods:
+    Type: Number
+    Default: 3
+    Description: "Minimum number of ECS tasks per ECS service"
+  MaxContainersFoodstoreFoods:
+    Type: Number
+    Default: 30
+    Description: "Maximum number of ECS tasks per ECS service"
+  AutoScalingTargetValueFoodstoreFoods:
+    Type: Number
+    Default: 50
+    Description: "Target CPU utilizatio (%) for ECS services auto scaling"
+  MinContainersPetstorePets:
+    Type: Number
+    Default: 3
+    Description: "Minimum number of ECS tasks per ECS service"
+  MaxContainersPetstorePets:
+    Type: Number
+    Default: 30
+    Description: "Maximum number of ECS tasks per ECS service"
+  AutoScalingTargetValuePetstorePets:
+    Type: Number
+    Default: 50
+    Description: "Target CPU utilizatio (%) for ECS services auto scaling"
+# The param below are from my custom vpc and taken from the console
+  VPC:
+    Type: String
+    Default: "vpc-08b0317de67c51e8a"
+    Description: "my custom VPC id"
+  PrivateRouteTableOne:
+    Type: String
+    Default: "rtb-039773bc115ad11f0"
+    Description: "My custom Private RouteTable One in my custom VPC"
+  PrivateRouteTableTwo:
+    Type: String
+    Default: "rtb-07f61e91d49ef37fd"
+    Description: "My custom Private RouteTable Two in my custom VPC"
+  PrivateSubnetOne:
+    Type: String
+    Default: "subnet-0966d0570f9f4ba4b"
+    Description: "Custom VPC id subnet one"
+  PrivateSubnetTwo:
+    Type: String
+    Default: "subnet-0343eaef6ad4d3d19"
+    Description: "Custom VPC id subnet one"  
+
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "Generic"
+        Parameters: 
+          - EnvironmentName
+          - PrivateDNSNamespaceName
+      - 
+        Label: 
+          default: "FoodstoreFoods Service"
+        Parameters: 
+          - MinContainersFoodstoreFoods
+          - MaxContainersFoodstoreFoods
+          - AutoScalingTargetValueFoodstoreFoods
+      - 
+        Label: 
+          default: "PetstorePets Service"
+        Parameters: 
+          - MinContainersPetstorePets
+          - MaxContainersPetstorePets
+          - AutoScalingTargetValuePetstorePets
+      - 
+        Label: 
+          default: "Existing custom VPC Parameters"
+        Parameters: 
+          - VPC
+          - PrivateRouteTableOne
+          - PrivateRouteTableTwo
+          - PrivateSubnetOne
+          - PrivateSubnetTwo
+
+Resources:
+
+  DynamoDBTableFoodstoreFoods:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: foodId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: foodId
+          KeyType: HASH
+
+  DynamoDBTablePetstorePets:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: petId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: petId
+          KeyType: HASH
+
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: "*"
+            Principal: "*"
+            Resource: "*"
+      RouteTableIds:
+        - !Ref 'PrivateRouteTableOne'
+        - !Ref 'PrivateRouteTableTwo'
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcId: !Ref 'VPC'
+
+  
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the Fargate containers
+      VpcId: !Ref 'VPC'
+
+  ContainerSecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref ContainerSecurityGroup
+      SourceSecurityGroupId: !Ref ContainerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+
+  AutoScalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceAutoscaleRole'
+
+  ECSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'ec2:AttachNetworkInterface'
+              - 'ec2:CreateNetworkInterface'
+              - 'ec2:CreateNetworkInterfacePermission'
+              - 'ec2:DeleteNetworkInterface'
+              - 'ec2:DeleteNetworkInterfacePermission'
+              - 'ec2:Describe*'
+              - 'ec2:DetachNetworkInterface'
+
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+            Resource: '*'
+
+  ECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs-tasks.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+        - PolicyName: AmazonECSTaskExecutionRolePolicy
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action:
+                # Allow the ECS Tasks to download images from ECR
+                - 'ecr:GetAuthorizationToken'
+                - 'ecr:BatchCheckLayerAvailability'
+                - 'ecr:GetDownloadUrlForLayer'
+                - 'ecr:BatchGetImage'
+
+                # Allow the ECS tasks to upload logs to CloudWatch
+                - 'logs:CreateLogStream'
+                - 'logs:PutLogEvents'
+              Resource: '*'
+
+  PrivateDNSNamespace:
+    Type: 'AWS::ServiceDiscovery::PrivateDnsNamespace'
+    Properties:
+      Vpc: !Ref VPC
+      Name: !Ref PrivateDNSNamespaceName
+
+  ServiceDiscoveryServiceFoodstoreFoods:
+    Type: 'AWS::ServiceDiscovery::Service'
+    Properties:
+      DnsConfig:
+        DnsRecords:
+          - Type: SRV
+            TTL: 60
+        NamespaceId: !Ref PrivateDNSNamespace
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      Name: 'foods.foodstore'
+
+  ServiceDiscoveryServicePetstorePets:
+    Type: 'AWS::ServiceDiscovery::Service'
+    Properties:
+      DnsConfig:
+        DnsRecords:
+          - Type: SRV
+            TTL: 60
+        NamespaceId: !Ref PrivateDNSNamespace
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+      Name: 'pets.petstore'
+
+  TaskRoleFoodstoreFoods:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: dynamodb-table-access
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:BatchGet*
+            - dynamodb:DescribeStream
+            - dynamodb:DescribeTable
+            - dynamodb:Get*
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:BatchWrite*
+            - dynamodb:CreateTable
+            - dynamodb:Delete*
+            - dynamodb:Update*
+            - dynamodb:PutItem
+            Resource: !GetAtt DynamoDBTableFoodstoreFoods.Arn
+
+  TaskRolePetstorePets:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+      - PolicyName: dynamodb-table-access
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - dynamodb:BatchGet*
+            - dynamodb:DescribeStream
+            - dynamodb:DescribeTable
+            - dynamodb:Get*
+            - dynamodb:Query
+            - dynamodb:Scan
+            - dynamodb:BatchWrite*
+            - dynamodb:CreateTable
+            - dynamodb:Delete*
+            - dynamodb:Update*
+            - dynamodb:PutItem
+            Resource: !GetAtt DynamoDBTablePetstorePets.Arn
+
+  TaskDefinitionFoodstoreFoods:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      TaskRoleArn: !GetAtt TaskRoleFoodstoreFoods.Arn
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+          - Name: 'FoodstoreFoods'
+            Image: 'simonepomata/ecsapi-demo-foodstore:latest'
+            Essential: true
+            PortMappings:
+              - ContainerPort: 8080
+                Protocol: tcp
+            Environment:
+              - Name: DynamoDBTable
+                Value: !Ref DynamoDBTableFoodstoreFoods
+      NetworkMode: awsvpc
+      Memory: '512'
+      Cpu: '256'
+
+  TaskDefinitionPetstorePets:
+    Type: 'AWS::ECS::TaskDefinition'
+    Properties:
+      TaskRoleArn: !GetAtt TaskRolePetstorePets.Arn
+      RequiresCompatibilities:
+        - FARGATE
+      ContainerDefinitions:
+          - Name: 'PetstorePets'
+            Image: 'simonepomata/ecsapi-demo-petstore:latest'
+            Essential: true
+            PortMappings:
+              - ContainerPort: 8080
+                Protocol: tcp
+            Environment:
+              - Name: DynamoDBTable
+                Value: !Ref DynamoDBTablePetstorePets
+      NetworkMode: awsvpc
+      Memory: '512'
+      Cpu: '256'
+
+  ServiceFoodstoreFoods: 
+    Type: AWS::ECS::Service
+    Properties: 
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinitionFoodstoreFoods
+      LaunchType: FARGATE
+      DesiredCount: 3
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceDiscoveryServiceFoodstoreFoods.Arn
+          Port: 8080
+      NetworkConfiguration:
+          AwsvpcConfiguration:
+            AssignPublicIp: DISABLED
+            Subnets:
+              - !Ref PrivateSubnetOne
+              - !Ref PrivateSubnetTwo
+            SecurityGroups:
+              - !Ref ContainerSecurityGroup
+
+  ServicePetstorePets: 
+    Type: AWS::ECS::Service
+    Properties: 
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinitionPetstorePets
+      LaunchType: FARGATE
+      DesiredCount: 3
+      ServiceRegistries:
+        - RegistryArn: !GetAtt ServiceDiscoveryServicePetstorePets.Arn
+          Port: 8080
+      NetworkConfiguration:
+          AwsvpcConfiguration:
+            AssignPublicIp: DISABLED
+            Subnets:
+              - !Ref PrivateSubnetOne
+              - !Ref PrivateSubnetTwo
+            SecurityGroups:
+              - !Ref ContainerSecurityGroup
+
+  AutoScalingTargetFoodstoreFoods:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinContainersFoodstoreFoods
+      MaxCapacity: !Ref MaxContainersFoodstoreFoods
+      ResourceId: !Join ['/', [service, !Ref ECSCluster, !GetAtt ServiceFoodstoreFoods.Name]]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !GetAtt AutoScalingRole.Arn
+
+  AutoScalingTargetPetstorePets:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Properties:
+      MinCapacity: !Ref MinContainersPetstorePets
+      MaxCapacity: !Ref MaxContainersPetstorePets
+      ResourceId: !Join ['/', [service, !Ref ECSCluster, !GetAtt ServicePetstorePets.Name]]
+      ScalableDimension: ecs:service:DesiredCount
+      ServiceNamespace: ecs
+      RoleARN: !GetAtt AutoScalingRole.Arn
+
+  AutoScalingPolicyFoodstoreFoods:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Join ['', [!GetAtt ServiceFoodstoreFoods.Name, '-AutoScalingPolicy']]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTargetFoodstoreFoods
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref AutoScalingTargetValueFoodstoreFoods
+
+  AutoScalingPolicyPetstorePets:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Join ['', [!GetAtt ServicePetstorePets.Name, '-AutoScalingPolicy']]
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref AutoScalingTargetPetstorePets
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref AutoScalingTargetValuePetstorePets
+
+  HttpApiVPCLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties: 
+      Name: !Ref EnvironmentName
+      SecurityGroupIds: 
+        - !Ref ContainerSecurityGroup
+      SubnetIds: 
+        - !Ref PrivateSubnetOne
+        - !Ref PrivateSubnetTwo
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+  
+  UserPoolClient:
+    Type: "AWS::Cognito::UserPoolClient"
+    Properties:
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      SupportedIdentityProviders:
+        - COGNITO
+      PreventUserExistenceErrors: ENABLED
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Body:
+        openapi: "3.0.1"
+        info:
+          title: !Ref EnvironmentName
+        components:
+          securitySchemes:
+            my-authorizer:
+              type: oauth2
+              flows: {}
+              x-amazon-apigateway-authorizer:
+                identitySource: "$request.header.Authorization"
+                jwtConfiguration:
+                  audience:
+                  - !Ref 'UserPoolClient'
+                  issuer: !GetAtt 'UserPool.ProviderURL'
+                type: jwt
+        paths:
+          /foodstore/foods/{foodId}:
+            get:
+              responses:
+                default:
+                  description: "Default response for GET /foodstore/foods/{foodId}"
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "1.0"
+                connectionId: !Ref HttpApiVPCLink
+                type: "http_proxy"
+                httpMethod: "ANY"
+                uri: !GetAtt ServiceDiscoveryServiceFoodstoreFoods.Arn #points to a food container
+                connectionType: "VPC_LINK"
+            put:
+              responses:
+                default:
+                  description: "Default response for PUT /foodstore/foods/{foodId}"
+              security:
+              - my-authorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "1.0"
+                connectionId: !Ref HttpApiVPCLink
+                type: "http_proxy"
+                httpMethod: "ANY"
+                uri: !GetAtt ServiceDiscoveryServiceFoodstoreFoods.Arn #points to a food container
+                connectionType: "VPC_LINK"
+          /petstore/pets/{petId}:
+            get:
+              responses:
+                default:
+                  description: "Default response for GET /petstore/pets/{petId}"
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "1.0"
+                connectionId: !Ref HttpApiVPCLink
+                type: "http_proxy"
+                httpMethod: "ANY"
+                uri: !GetAtt ServiceDiscoveryServicePetstorePets.Arn #points to a pets container
+                connectionType: "VPC_LINK"
+            put:
+              responses:
+                default:
+                  description: "Default response for PUT /petstore/pets/{petId}"
+              security:
+              - my-authorizer: []
+              x-amazon-apigateway-integration:
+                payloadFormatVersion: "1.0"
+                connectionId: !Ref HttpApiVPCLink
+                type: "http_proxy"
+                httpMethod: "ANY"
+                uri: !GetAtt ServiceDiscoveryServicePetstorePets.Arn #points to a pets container
+                connectionType: "VPC_LINK"
+        x-amazon-apigateway-cors:
+          # This is a Test client web app that invokes the API, used in the blog post, for demostration purposes only.
+          # In production, make sure that you do NOT allow any untrusted origin.
+          allowOrigins:
+            - 'https://master.d34am23lsz3nvz.amplifyapp.com'
+          allowHeaders:
+            - '*'
+          allowMethods:
+            - 'PUT'
+            - 'GET'
+        x-amazon-apigateway-importexport-version: "1.0"
+
+  HttpApiStage:
+    Type: 'AWS::ApiGatewayV2::Stage'
+    Properties:
+      StageName: '$default'
+      ApiId: !Ref 'HttpApi'
+      AutoDeploy: true
+
+Outputs:
+  APITestPage:
+    Description: The URL of the sample web app client, used to test the sample API
+    Value: !Join
+      - ''
+      - - "https://master.d34am23lsz3nvz.amplifyapp.com/?stackregion="
+        - !Ref 'AWS::Region'
+        - "&stackhttpapi="
+        - !Ref 'HttpApi'
+        - "&stackuserpool="
+        - !Ref 'UserPool'
+        - "&stackuserpoolclient="
+        - !Ref 'UserPoolClient'
+  APIInvokeURL:
+    Description: Invoke URL for the HTTP API
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com'
+  APIInvokeURLFoodstoreFoods:
+    Description: Invoke URL for the HTTP API for the service Foodstore Foods
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/foodstore/foods/{foodId}'
+  APIInvokeURLPetstorePets:
+    Description: Invoke URL for the HTTP API for the service Petstore Pets
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/petstore/pets/{petId}'
+  APIId:
+    Description: The ID of the HTTP API
+    Value: !Ref 'HttpApi'
+  ECSClusterName:
+    Description: The name of the ECS cluster
+    Value: !Ref 'ECSCluster'
+  # VpcId:
+  #   Description: The ID of the VPC that this stack is deployed in
+  #   Value: !Ref 'VPC'
+  # ContainerSecurityGroup:
+  #   Description: A security group used to allow Fargate containers to receive traffic
+  #   Value: !Ref 'ContainerSecurityGroup'
+  # PrivateDNSNamespace:
+  #   Description: The ID of the private DNS namespace.
+  #   Value: !Ref 'PrivateDNSNamespace' 
