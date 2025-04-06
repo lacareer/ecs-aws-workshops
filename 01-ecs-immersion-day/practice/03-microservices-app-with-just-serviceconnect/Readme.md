@@ -14,8 +14,8 @@ ECS_TASK_ROLE="arn:aws:iam::066638479762:role/ecs-task-role"
 MY_VPC="vpc-08b0317de67c51e8a"
 
 <!-- Create Cluster and Service Connect Namespace-->
-** * Make sure the namespace and the cluster name match, otherwise connectivity between containers tend to fail. * **
-** * I don't know why bcs I could not find a doc as to why but realized it after much troubleshooting for days* **
+***Make sure the namespace and the cluster name match, otherwise connectivity between containers tend to fail.***
+***I don't know why bcs I could not find a doc as to why but realized it after much troubleshooting for days***
 
 Create an Amazon ECS cluster named nginx_cluster to use. The parameter --service-connect-defaults sets the default namespace of the cluster. In the example output, a AWS Cloud Map namespace of the name nginx_service_connect doesn't exist in this account and AWS Region, so the namespace is created by Amazon ECS. The namespace is made in AWS Cloud Map in the account, and is visible with all of the other namespaces, so use a name that indicates the purpose.
 
@@ -106,7 +106,7 @@ In our case to exec into one of our nginx_1 task container, we run:
 
 -$ aws ecs execute-command --cluster nginx_cluster --task arn:aws:ecs:us-east-1:066638479762:task/nginx_cluster/5c9a5f4f9acd478897bfeff5a31f5a48 --container nginx_1 --interactive --command "/bin/bash" --region us-east-1
 
-** * Note (If the containers were deployed in parallel, the /etc/hosts file might not have been updated correctly for the second container. Redeploying the affected container with --force-new-deployment can refresh the /etc/hosts entries to show all containers and their dns names)* **
+***Note (If the containers were deployed in parallel, the /etc/hosts file might not have been updated correctly for the second container. Redeploying the affected container with --force-new-deployment can refresh the /etc/hosts entries to show all containers and their dns names)***
 
 root@ip-10-0-3-187:/# cat /etc/hosts
 
@@ -121,7 +121,7 @@ In our case to exec into one of our nginx_2 task container, we run:
 
 -$ aws ecs execute-command --cluster nginx_cluster --task arn:aws:ecs:us-east-1:066638479762:task/nginx_cluster/b3b3a6eea7bb4d2c8e2587c7f010bb87 --container nginx_2 --interactive --command "/bin/bash" --region us-east-1
 
-** * Note (If the containers were deployed in parallel, the /etc/hosts file might not have been updated correctly for the second container. Redeploying the affected container with --force-new-deployment can refresh the /etc/hosts entries to show all containers and their dns names)* **
+***Note (If the containers were deployed in parallel, the /etc/hosts file might not have been updated correctly for the second container. Redeploying the affected container with --force-new-deployment can refresh the /etc/hosts entries to show all containers and their dns names)***
 
 root@ip-10-0-2-52:/# cat /etc/hosts
 

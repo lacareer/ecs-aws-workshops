@@ -349,7 +349,7 @@ When you visit the post and threads endopoints below, the posts and threads data
 
 At this point the microservices are reachable and returns there individual data. 
 
-** *CONGRATULATION ON SUCCESSFULLY DEPLOYING YOUR FIRST MICROSERVICES!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!* **
+***CONGRATULATION ON SUCCESSFULLY DEPLOYING YOUR FIRST MICROSERVICES!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!***
 
 Feel free to delete the monolith service at this point because you no longer need it.
 
@@ -359,7 +359,7 @@ In this section, you'll enable the ECS Exec feature to run commands in or get a 
 
 By leveraging IAM policies and roles, you can tightly control who has access to execute commands within containers, thus enhancing the overall security posture. Additionally, all commands executed through ECS Exec are logged in CloudWatch, providing an audit trail for compliance and monitoring purposes. More information can be found here => https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-exec.html.
 
-** * Set the IAM role for the user* **
+***Set the IAM role for the user***
 Since you'll be using ECS Exec from your IDE, ensure that the IAM role attached to the IDE has the necessary IAM policies. Update the IAM role associated with the EC2 instance running your IDE by adding the following in-line policy, where 'ecs-monolith-microservices-cluster' is the cluster where we have our microservices:
 
     cat << EOF > ecs-exec-command-policy.json
@@ -381,7 +381,7 @@ Since you'll be using ECS Exec from your IDE, ensure that the IAM role attached 
     }
     EOF
 
-** * Now attach the policy (the above and below command not applicable to me since my IDE is configure with admin access):* **
+***Now attach the policy (the above and below command not applicable to me since my IDE is configure with admin access):***
 
 -$ aws iam put-role-policy \
     --role-name $(aws sts get-caller-identity --query 'Arn' | cut -d'/' -f2) \
@@ -443,9 +443,9 @@ Verify you have AWS Session Manger installed by running on Linux (if installed s
 
 Other follow instruction here to install AWS Session-Manager plugin and verify installation as above
 
-    https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-debian-and-ubuntu.html (Ubuntu Linux)
+    ***https://docs.aws.amazon.com/systems-manager/latest/userguide/install-plugin-debian-and-ubuntu.html (Ubuntu Linux)***
 
-    https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html (Other systems)
+    ***https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html (Other systems)***
 
 <!-- Enable Amazon ECS Exec on services and tasks -->
 Update the users, posts and threads services to enable Amazon ECS Exec using the --enable-execute-command flag:
@@ -510,7 +510,7 @@ Print and checkout that the task arns match what you have on the console.
 
 <!-- Connect to the ECS Users Task container and call the Threads and Posts microservices on the same service connect namespace  -->
 
-#** *NOTE THAT THE SHELL FOR THE 'mhart/alpine-node:7.10.1' FOR BUUILDING THE IMAGES IS: /bin/ash AND THE PACKAGE MANAGER IS 'apk'* **
+***NOTE THAT THE SHELL FOR THE 'mhart/alpine-node:7.10.1' FOR BUUILDING THE IMAGES IS: /bin/ash AND THE PACKAGE MANAGER IS 'apk'***
 
 Start your /bin/ash interactive session in the running task:
 
