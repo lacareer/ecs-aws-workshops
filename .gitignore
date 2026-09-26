@@ -1,0 +1,8 @@
+# Terraform artifacts
+**/.terraform/
+*.tfstate
+*.tfstate.*
+#.terraform.lock.hcl
+#terraform
+# # .tfplan files
+# *.tfplan

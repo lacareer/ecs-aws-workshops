@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "standing up an ECS Express Mode setup"
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-express
+    Description: Name of the ECS cluster for Express Mode services.
+
+  ServiceName:
+    Type: String
+    Default: ui-express
+    Description: Name of the ECS Express Mode service.
+
+  ContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-ui:1.5.0
+    Description: Container image for the retail store UI.
+
+  ContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  HealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+# added thos paramteter becaause by default express mode allocates 1vpc=1024cpu units
+# the app was triggering n alarm due to insufficient CPU units [the default of 1024 seem to be set to alarm at 60% it seems]
+# Becasue the  target tracking scaling policy was triggering alarm at startup because of the cpu being at above 60% before dropping to 54%
+# increasing the CPU units to 2048 helps prevent this issue and clear the alarm.
+# cpu increase will warrant a corresponding increase in memory allocation if needed.
+# https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html
+  Cpu:
+    Type: String
+    Default: 2048
+    Description: CPU units for the ECS task.
+
+  Mem:
+    Type: String
+    Default: 4096
+    Description: Memory units for the ECS task.
+
+  UiTheme:
+    Type: String
+    Default: orange
+    Description: Theme applied to the retail store UI (RETAIL_UI_THEME).
+
+# -------------------------------------------------------------------------
+# Infrastructure Role (REQUIRED)
+# Allows ECS Express Mode to provision/manage load balancers, security
+# groups, SSL certificates, and auto scaling on your behalf.
+# -------------------------------------------------------------------------
+Resources:
+  
+  EcsExpressInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsExpressInfrastructureRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAccessToECSForInfrastructureManagement
+            Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSInfrastructureRoleforExpressGatewayServices
+      Tags:
+        - Key: Name
+          Value: ecsExpressInfrastructureRole       
+
+# -------------------------------------------------------------------------
+# Task Execution Role (REQUIRED)
+# Allows the ECS agent to pull container images (ECR) and push container
+# logs to CloudWatch Logs.
+# -------------------------------------------------------------------------        
+  RetailStoreEcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskExecutionRole
+
+  EcsExpressTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsExpressTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ecsExpressTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowFireLensCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/express/*
+      Tags:
+        - Key: Name
+          Value: ecsExpressTaskRole
+
+  # ---------------------------------------------------------------------
+  # ECS cluster hosting the Express service.
+  # ---------------------------------------------------------------------
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # ---------------------------------------------------------------------
+  # ECS Express Mode service. Express Mode auto-provisions the ALB with
+  # HTTPS, target groups, security groups, auto scaling, and logging.
+  # ---------------------------------------------------------------------
+  UiExpressService:
+    Type: AWS::ECS::ExpressGatewayService
+    Properties:
+      ServiceName: !Ref ServiceName
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      Cluster: !Ref EcsCluster
+      ExecutionRoleArn: !GetAtt RetailStoreEcsTaskExecutionRole.Arn
+      InfrastructureRoleArn: !GetAtt EcsExpressInfrastructureRole.Arn
+      TaskRoleArn: !GetAtt EcsExpressTaskRole.Arn
+      HealthCheckPath: !Ref HealthCheckPath
+      PrimaryContainer:
+        Image: !Ref ContainerImage
+        ContainerPort: !Ref ContainerPort
+        Environment:
+          - Name: RETAIL_UI_THEME
+            Value: !Ref UiTheme        
+      NetworkConfiguration:
+        Subnets:
+          - !ImportValue VpcAPublicSubnetAZ1
+          - !ImportValue VpcAPublicSubnetAZ2
+      Tags:
+        - Key: Name
+          Value: !Ref ServiceName
+
+
+
+
+
+
+
+
+
+
+
+Outputs:
+  ServiceEndpoint:
+    Description: HTTPS endpoint of the Express Mode service.
+    Value: !GetAtt UiExpressService.Endpoint
+
+  ServiceArn:
+    Description: ARN of the Express Mode service.
+    Value: !GetAtt UiExpressService.ServiceArn
+
+  ClusterName:
+    Description: ECS cluster hosting the Express service.
+    Value: !Ref EcsCluster          
