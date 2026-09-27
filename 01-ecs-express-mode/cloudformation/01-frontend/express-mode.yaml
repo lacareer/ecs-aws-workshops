@@ -119,7 +119,7 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogStreams
                   - logs:PutRetentionPolicy
-                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/express/*
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/express-mode/*
       Tags:
         - Key: Name
           Value: ecsExpressTaskRole

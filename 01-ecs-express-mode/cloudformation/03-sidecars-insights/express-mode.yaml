@@ -263,7 +263,7 @@ Resources:
                   - logs:PutLogEvents
                   - logs:DescribeLogStreams
                   - logs:PutRetentionPolicy
-                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/express/*
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/express-mode/*
               - Sid: SessionIntoEcsExpressUiTask
                 Effect: Allow
                 Action:
@@ -279,13 +279,96 @@ Resources:
   # ---------------------------------------------------------------------
   # ECS cluster hosting the Express service.
   # ---------------------------------------------------------------------
+
+  # To use Container Insights with enhanced observability, set the containerInsights account setting to enhanced.
+  # To use Container Insights, set the containerInsights account setting to enabled.
+  # PluralSight account setting for Container Insights is enabled
   EcsCluster:
     Type: AWS::ECS::Cluster
     Properties:
       ClusterName: !Ref ClusterName
       ClusterSettings:
         - Name: containerInsights
-          Value: enabled
+          Value: enabled # supported values are enhanced, enabled, and disabled
+
+  # Log group FireLens routes app logs to
+  UiFireLensLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/express-mode/firelens
+      RetentionInDays: 7
+
+  # Log group for Fluent Bit's own internal logs
+  UiFireLensInternalLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/express-mode/firelens-internal
+      RetentionInDays: 7
+
+  UiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      # The family name for the task definition. Express Mode previously generated this value using <cluster_name>_<service_name>.
+      # If 1st time deployment, you can set any family name you like.
+      Family: retail-store-express-ui 
+      RequiresCompatibilities:
+        - FARGATE
+      NetworkMode: awsvpc
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      ExecutionRoleArn: !GetAtt RetailStoreEcsTaskExecutionRole.Arn
+      # Task role must allow logs:CreateLogGroup/Stream/PutLogEvents for FireLens
+      TaskRoleArn: !GetAtt EcsExpressTaskRole.Arn
+      ContainerDefinitions:
+        #Task definition must have a container named Main 
+        # or the Express Service resource will fail from my experience when updating the existing stack to use custom task definitions.
+        # 1) The application container — log driver changed to awsfirelens
+        - Name: Main
+          Image: !Ref UiContainerImage
+          Essential: true
+          PortMappings:
+            - Name: ui
+              ContainerPort: !Ref UiContainerPort
+              HostPort: !Ref UiContainerPort
+              Protocol: tcp
+          Environment:
+            - Name: RETAIL_UI_THEME
+              Value: !Ref UiTheme        
+            - Name: RETAIL_UI_ENDPOINTS_CATALOG
+              Value: !Sub "https://${CatalogExpressService.Endpoint}"        
+            - Name: RETAIL_UI_ENDPOINTS_CARTS
+              Value: !Sub "https://${CartExpressService.Endpoint}"        
+            - Name: RETAIL_UI_ENDPOINTS_CHECKOUT
+              Value: !Sub "https://${CheckoutExpressService.Endpoint}"        
+            - Name: RETAIL_UI_ENDPOINTS_ORDERS
+              Value: !Sub "https://${OrdersExpressService.Endpoint}"  
+          DependsOn:
+            - ContainerName: log-router
+              Condition: START              
+          LogConfiguration:
+            LogDriver: awsfirelens
+            Options:
+              Name: cloudwatch
+              region: !Ref AWS::Region
+              log_group_name: !Ref UiFireLensLogGroup
+              log_stream_prefix: ui-
+              auto_create_group: "true"
+
+        # 2) The FireLens / Fluent Bit sidecar (log router)
+        - Name: log-router
+          Image: public.ecr.aws/aws-observability/aws-for-fluent-bit:stable
+          Essential: false
+          MemoryReservation: 50
+          FirelensConfiguration:
+            Type: fluentbit
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiFireLensInternalLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: firelens
+              awslogs-create-group: "true"
+
 
   # ---------------------------------------------------------------------
   # UI ECS Express Mode service. Express Mode auto-provisions the ALB with
@@ -295,27 +378,30 @@ Resources:
     Type: AWS::ECS::ExpressGatewayService
     Properties:
       ServiceName: !Ref UiServiceName
-      Cpu: !Ref Cpu
-      Memory: !Ref Mem
       Cluster: !Ref EcsCluster
-      ExecutionRoleArn: !GetAtt RetailStoreEcsTaskExecutionRole.Arn
-      InfrastructureRoleArn: !GetAtt EcsExpressInfrastructureRole.Arn
-      TaskRoleArn: !GetAtt EcsExpressTaskRole.Arn
       HealthCheckPath: !Ref UiHealthCheckPath
-      PrimaryContainer:
-        Image: !Ref UiContainerImage
-        ContainerPort: !Ref UiContainerPort
-        Environment:
-          - Name: RETAIL_UI_THEME
-            Value: !Ref UiTheme        
-          - Name: RETAIL_UI_ENDPOINTS_CATALOG
-            Value: !Sub "https://${CatalogExpressService.Endpoint}"        
-          - Name: RETAIL_UI_ENDPOINTS_CARTS
-            Value: !Sub "https://${CartExpressService.Endpoint}"        
-          - Name: RETAIL_UI_ENDPOINTS_CHECKOUT
-            Value: !Sub "https://${CheckoutExpressService.Endpoint}"        
-          - Name: RETAIL_UI_ENDPOINTS_ORDERS
-            Value: !Sub "https://${OrdersExpressService.Endpoint}"       
+      InfrastructureRoleArn: !GetAtt EcsExpressInfrastructureRole.Arn
+      ## Comment: The primary container configuration is commented out because the task definition is being referenced directly via TaskDefinitionArn.
+      ## A demonstration of how to configure the primary container directly within the ECS and to add a side car container for logging.
+      # Memory: !Ref Mem
+      # Cpu: !Ref Cpu
+      # ExecutionRoleArn: !GetAtt RetailStoreEcsTaskExecutionRole.Arn
+      # TaskRoleArn: !GetAtt EcsExpressTaskRole.Arn
+      # PrimaryContainer:
+      #   Image: !Ref UiContainerImage
+      #   ContainerPort: !Ref UiContainerPort
+      #   Environment:
+      #     - Name: RETAIL_UI_THEME
+      #       Value: !Ref UiTheme        
+      #     - Name: RETAIL_UI_ENDPOINTS_CATALOG
+      #       Value: !Sub "https://${CatalogExpressService.Endpoint}"        
+      #     - Name: RETAIL_UI_ENDPOINTS_CARTS
+      #       Value: !Sub "https://${CartExpressService.Endpoint}"        
+      #     - Name: RETAIL_UI_ENDPOINTS_CHECKOUT
+      #       Value: !Sub "https://${CheckoutExpressService.Endpoint}"        
+      #     - Name: RETAIL_UI_ENDPOINTS_ORDERS
+      #       Value: !Sub "https://${OrdersExpressService.Endpoint}"   
+      TaskDefinitionArn: !GetAtt UiTaskDefinition.TaskDefinitionArn
       NetworkConfiguration:
         Subnets:
           - !ImportValue VpcAPublicSubnetAZ1
