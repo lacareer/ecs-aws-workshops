@@ -1,0 +1,626 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "standing up an ECS Express Mode setup"
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster for Express Mode services.
+
+  UiServiceName:
+    Type: String
+    Default: ui
+    Description: Name of the ECS Express Mode service.
+
+  CatalogServiceName:
+    Type: String
+    Default: catalog
+    Description: Name of the ECS Express Mode catalog service.
+
+  CartServiceName:
+    Type: String
+    Default: cart
+    Description: Name of the ECS Express Mode cart service.
+
+  OrderServiceName:
+    Type: String
+    Default: order
+    Description: Name of the ECS Express Mode order service.
+
+  CheckoutServiceName:
+    Type: String
+    Default: checkout
+    Description: Name of the ECS Express Mode checkout service.
+
+  UiContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-ui:1.5.0
+    Description: Container image for the retail store UI.
+
+  CatalogContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-catalog:1.5.0
+    Description: Container image for the retail store catalog service.
+
+  CartContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-cart:1.5.0
+    Description: Container image for the retail store cart service.
+
+  OrderContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-orders:1.5.0
+    Description: Container image for the retail store order service.
+
+  CheckoutContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-checkout:1.5.0
+    Description: Container image for the retail store checkout service.
+
+  UiContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CatalogContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CartContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  OrderContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CheckoutContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  UiHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  CatalogHealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Health check path exposed by the application. 
+
+  CartHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  OrderHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  CheckoutHealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Health check path exposed by the application. 
+
+  Cpu:
+    Type: String
+    Default: 2048
+    Description: CPU units for the ECS task.
+
+  Mem:
+    Type: String
+    Default: 4096
+    Description: Memory units for the ECS task.
+
+  UiTheme:
+    Type: String
+    Default: orange
+    Description: Theme applied to the retail store UI (RETAIL_UI_THEME).
+
+  ApprovalBucketName:
+    Type: String
+    Description: Existing S3 bucket that holds the blue/green manual-approval marker object.
+    Default: my-ecs-approval-bucket
+  ApprovalObjectKey:
+    Type: String
+    Default: approvals/ui-blue-green.txt
+    Description: Object key whose presence approves the production traffic shift.
+
+Resources:
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: retail-store-alb
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue VpcAPublicSubnetAZ1
+        - !ImportValue VpcAPublicSubnetAZ2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+#----------------------------------------------------------------
+## Modified or new resources for the blue/green deployment setup
+#----------------------------------------------------------------
+  # modified alb sg
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ALB.
+      GroupName: retail-store-alb-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        # test traffic ingress for blue/green validation
+        # use perhaps vpc cidr or specific IP range for testing or aws managed prefix list or onprem cidr
+        # This prevents unrestricted access to the test listener from the public internet like below.
+        - IpProtocol: tcp        
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0 
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  BlueTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-blue-tg
+      VpcId: !ImportValue VpcAId
+      Port: !Ref UiContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: !Ref UiHealthCheckPath
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  GreenTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-green-tg
+      VpcId: !ImportValue VpcAId
+      Port: !Ref UiContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: !Ref UiHealthCheckPath
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  ProductionListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100
+              - TargetGroupArn: !Ref GreenTargetGroup
+                Weight: 0
+
+  TestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 8080
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100
+              - TargetGroupArn: !Ref GreenTargetGroup
+                Weight: 0
+
+  ProductionListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ProductionListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/*"]
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100
+              - TargetGroupArn: !Ref GreenTargetGroup
+                Weight: 0
+            TargetGroupStickinessConfig:
+              Enabled: true
+              DurationSeconds: 5
+
+  TestListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref TestListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values: ["/*"]
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100
+              - TargetGroupArn: !Ref GreenTargetGroup
+                Weight: 0
+            TargetGroupStickinessConfig:
+              Enabled: true
+              DurationSeconds: 5
+
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsInfrastructureRoleForLoadBalancers
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers
+
+#----------------------------------------------------------------
+
+#-----------------------------------------------------------------
+## Target Group and Listener for UI without blue-green deployment
+#-----------------------------------------------------------------
+
+  # UiTargetGroup:
+  #   Type: AWS::ElasticLoadBalancingV2::TargetGroup
+  #   Properties:
+  #     Name: retail-store-ui-tg
+  #     VpcId: !ImportValue VpcAId
+  #     Port: !Ref UiContainerPort
+  #     Protocol: HTTP
+  #     TargetType: ip
+  #     HealthCheckPath: !Ref UiHealthCheckPath
+  #     HealthCheckProtocol: HTTP
+  #     Matcher:
+  #       HttpCode: "200"
+
+  # AlbHttpListener:
+  #   Type: AWS::ElasticLoadBalancingV2::Listener
+  #   Properties:
+  #     LoadBalancerArn: !Ref ApplicationLoadBalancer
+  #     Port: 80
+  #     Protocol: HTTP
+  #     DefaultActions:
+  #       - Type: forward
+  #         TargetGroupArn: !Ref UiTargetGroup
+
+#----------------------------------------------------------------
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ui-facing ECS tasks.
+      GroupName: retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # To use Container Insights with enhanced observability, set the containerInsights account setting to enhanced.
+  # To use Container Insights, set the containerInsights account setting to enabled.
+  # PluralSight account setting for Container Insights is enabled
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled # supported values are enhanced, enabled, and disabled
+
+  UiLogConfiguration:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-ecs-tasks-ui-service
+      RetentionInDays: 7
+
+  RetailStoreEcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowCreateTaskLogGroup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${UiLogConfiguration}:*         
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskExecutionRole
+
+  RetailStoreEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowFireLensCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${UiLogConfiguration}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'                
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskRole
+
+  UiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: retail-store-ecs-ui
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref RetailStoreEcsTaskExecutionRole
+      TaskRoleArn: !Ref RetailStoreEcsTaskRole
+      ContainerDefinitions:
+        - Name: application #same name as in the UiService LoadBalancers section
+          Image: public.ecr.aws/aws-containers/retail-store-sample-ui:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: !Ref UiContainerPort
+              HostPort: !Ref UiContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          VersionConsistency: disabled
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiLogConfiguration
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ui-service
+              # awslogs-create-group: "true"
+          Environment:
+            - Name: RETAIL_UI_THEME
+              Value: !Ref UiTheme            
+
+  # modified ui service for blue/green deployment
+  UiService:
+    Type: AWS::ECS::Service
+    # Service creation fails if the listener isn't attached to the target group yet
+    DependsOn: 
+      - ProductionListenerRule
+      - TestListenerRule 
+      - ManualApprovalFunction   
+    Properties:
+      ServiceName: !Ref UiServiceName
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref UiTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      EnableExecuteCommand: true
+      # modified uiservice configuration for blue/green deployment
+      DeploymentConfiguration:
+        Strategy: BLUE_GREEN
+        BakeTimeInMinutes: 2
+        ## I did not use nor test the configuration for the manual-approval Lambda.
+        ## Hence, why ic ommented it out
+        ## Optional manual-approval hook after test traffic shifts (see note below)
+        LifecycleHooks:
+          - HookTargetArn: !GetAtt ManualApprovalFunction.Arn
+            RoleArn: !GetAtt ECSLifecycleHookRole.Arn
+            LifecycleStages:
+              - POST_TEST_TRAFFIC_SHIFT
+      LoadBalancers:
+        - TargetGroupArn: !Ref BlueTargetGroup
+          ContainerName: application
+          ContainerPort: !Ref UiContainerPort
+          AdvancedConfiguration:
+            AlternateTargetGroupArn: !Ref GreenTargetGroup
+            ProductionListenerRule: !Ref ProductionListenerRule
+            TestListenerRule: !Ref TestListenerRule
+            RoleArn: !GetAtt EcsInfrastructureRole.Arn
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref EcsSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref UiServiceName
+
+  ECSLifecycleHookRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ECSLifecycleHookRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeManualApprovalHook
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt ManualApprovalFunction.Arn        
+
+  ManualApprovalLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/ecs-blue-green-manual-approval
+      RetentionInDays: 7
+
+  ManualApprovalFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsBlueGreenManualApprovalRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ManualApprovalPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ManualApprovalLogGroup}:*"
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub "arn:${AWS::Partition}:s3:::${ApprovalBucketName}/${ApprovalObjectKey}"
+
+  ManualApprovalFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: ManualApprovalLogGroup
+    Properties:
+      FunctionName: ecs-blue-green-manual-approval
+      Runtime: python3.13
+      Architectures: [arm64]
+      Handler: index.lambda_handler
+      Timeout: 10
+      Role: !GetAtt ManualApprovalFunctionRole.Arn
+      Environment:
+        Variables:
+          S3_BUCKET: !Ref ApprovalBucketName
+          S3_BUCKET_KEY: !Ref ApprovalObjectKey
+      Code:
+        ZipFile: |
+          import os
+          import boto3
+          from botocore.exceptions import ClientError
+
+          def lambda_handler(event, context):
+              print(f"Manual approval event: {event}")
+              
+              if "S3_BUCKET" not in os.environ or "S3_BUCKET_KEY" not in os.environ:
+                  print("S3_BUCKET or S3_BUCKET_KEY environment variable not found")
+                  return {"hookStatus": "FAILED"}
+              
+              s3_bucket = os.environ.get("S3_BUCKET")
+              my_approval_file = os.environ.get("S3_BUCKET_KEY")            
+              approval = check_approval_file(s3_bucket, my_approval_file)
+
+              if approval == "SUCCEEDED":
+                  print(f"{my_approval_file} - Approval file found: {approval}")
+                  return {"hookStatus": "SUCCEEDED"}
+              
+              if approval == "FAILED":
+                  print(f"{my_approval_file} - Approval file found: {approval}")
+                  return {"hookStatus": "FAILED"}
+              
+              print(f"{my_approval_file} - Approval file not found, waiting for manual approval")
+              return {
+                  "hookStatus": "IN_PROGRESS",
+                  "callBackDelay": 30,
+              }
+
+          def check_approval_file(s3_bucket, approval_file):
+            """Check S3 for the approval marker; distinguish 'missing' from real errors"""
+            print(f"{approval_file} - Checking for approval file: s3://{s3_bucket}/{approval_file}")
+            try:
+                s3_client = boto3.client("s3")
+                obj = s3_client.get_object(Bucket=s3_bucket, Key=approval_file)
+                content = obj["Body"].read().decode("utf-8").strip()   # read exactly once
+                if content == "approved":
+                    print(f"{approval_file} - Check succeeded")
+                    return "SUCCEEDED"
+                print(f"{approval_file} - Check failed: content={content!r}")
+                return "FAILED"
+            except ClientError as e:
+                code = e.response["Error"]["Code"]
+                # Only a genuinely absent object means "keep waiting"
+                if code in ("NoSuchKey", "404"):
+                    print(f"{approval_file} - Approval file not found yet")
+                    return None
+                # Permission/config errors must surface, not loop forever
+                print(f"{approval_file} - S3 error {code}: {e}")
+                return "FAILED"                                         
+
+#-------------------------------------------------------------------------------------

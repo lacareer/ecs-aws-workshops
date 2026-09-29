@@ -1,0 +1,1474 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "standing up an ECS Express Mode setup"
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster for Express Mode services.
+
+  UiServiceName:
+    Type: String
+    Default: ui
+    Description: Name of the ECS Express Mode service.
+
+  CatalogServiceName:
+    Type: String
+    Default: catalog
+    Description: Name of the ECS Express Mode catalog service.
+
+  CartServiceName:
+    Type: String
+    Default: cart
+    Description: Name of the ECS Express Mode cart service.
+
+  OrderServiceName:
+    Type: String
+    Default: order
+    Description: Name of the ECS Express Mode order service.
+
+  CheckoutServiceName:
+    Type: String
+    Default: checkout
+    Description: Name of the ECS Express Mode checkout service.
+
+  UiContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-ui:1.5.0
+    Description: Container image for the retail store UI.
+
+  CatalogContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-catalog:1.5.0
+    Description: Container image for the retail store catalog service.
+
+  CartContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-cart:1.5.0
+    Description: Container image for the retail store cart service.
+
+  OrderContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-orders:1.5.0
+    Description: Container image for the retail store order service.
+
+  CheckoutContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-checkout:1.5.0
+    Description: Container image for the retail store checkout service.
+
+  UiContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CatalogContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CartContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  OrderContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CheckoutContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  UiHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  CatalogHealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Health check path exposed by the application. 
+
+
+  CartHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  OrderHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  CheckoutHealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Health check path exposed by the application. 
+
+  Cpu:
+    Type: String
+    Default: 2048
+    Description: CPU units for the ECS task.
+
+  Mem:
+    Type: String
+    Default: 4096
+    Description: Memory units for the ECS task.
+
+  UiTheme:
+    Type: String
+    Default: green
+    Description: Theme applied to the retail store UI (RETAIL_UI_THEME).
+
+Resources:
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: retail-store-alb
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue VpcAPublicSubnetAZ1
+        - !ImportValue VpcAPublicSubnetAZ2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ALB.
+      GroupName: retail-store-alb-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  UiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-tg
+      VpcId: !ImportValue VpcAId
+      Port: !Ref UiContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: !Ref UiHealthCheckPath
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  AlbHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UiTargetGroup
+
+  # UI security group
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ui-facing ECS tasks.
+      GroupName: retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # To use Container Insights with enhanced observability, set the containerInsights account setting to enhanced.
+  # To use Container Insights, set the containerInsights account setting to enabled.
+  # PluralSight account setting for Container Insights is enabled
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled # supported values are enhanced, enabled, and disabled
+
+  RetailStoreEcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowCreateTaskLogGroup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${UiLogConfiguration}:*"         
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskExecutionRole
+
+  RetailStoreEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowFireLensCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${UiLogConfiguration}:*"
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'                
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskRole
+
+  UiLogConfiguration:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-ecs-tasks-ui-service
+      RetentionInDays: 7
+
+  UiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: retail-store-ecs-ui
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref RetailStoreEcsTaskExecutionRole
+      TaskRoleArn: !Ref RetailStoreEcsTaskRole
+      ContainerDefinitions:
+        - Name: application #same name as in the UiService LoadBalancers section
+          Image: public.ecr.aws/aws-containers/retail-store-sample-ui:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: !Ref UiContainerPort
+              HostPort: !Ref UiContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          VersionConsistency: disabled
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiLogConfiguration
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ui-service
+              # awslogs-create-group: "true"
+          Environment:
+            - Name: RETAIL_UI_THEME
+              Value: !Ref UiTheme 
+            - Name: RETAIL_UI_ENDPOINTS_ORDERS
+              Value: http://orders
+            - Name: RETAIL_UI_ENDPOINTS_CHECKOUT
+              Value: http://checkout
+            - Name: RETAIL_UI_ENDPOINTS_CATALOG
+              Value: http://catalog                         
+  
+  # NOTE: UI service must wait for all the other services in the Service Connect namespace to be available before it starts.
+  # This because the UI Service connects to all backend service using Service Connect, and it needs them to be available to function correctly.
+  # Otherwise, the UI service might start before the backend services are ready, resulting in not being able to discover them and page not logging catalog data.
+  # If it does, you must force a new deployment of the UI service to ensure it can discover the backend services.
+  # To solve that I have added the dependency on the backend services here and it ensures that the UI service starts only after the backend services are available.
+  # This  fixed all my service discovery issues.
+  UiService:
+    # Service creation fails if the listener isn't attached to the target group yet
+    DependsOn:
+      - AlbHttpListener
+      - OrdersService
+      - CheckoutService
+      - CatalogService
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Ref UiServiceName
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref UiTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      EnableExecuteCommand: true
+      LoadBalancers:
+        - TargetGroupArn: !Ref UiTargetGroup
+          ContainerName: application # must be same as in the UiTaskDefinition
+          ContainerPort: !Ref UiContainerPort
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref EcsSecurityGroup
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !GetAtt RetailStoreNamespace.Arn
+        Services:
+          - PortName: application # must be same as in the UiTaskDefinition
+            DiscoveryName: ui
+            ClientAliases:
+              - Port: 80
+                DnsName: ui            
+      Tags:
+        - Key: Name
+          Value: !Ref UiServiceName
+
+  CustomKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: retail store ecs CMK
+      EnableKeyRotation: true
+      KeyPolicy:
+        Statement:
+          - Action: kms:*
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - 'arn:'
+                  - !Ref AWS::Partition
+                  - ':iam::'
+                  - !Ref AWS::AccountId
+                  - ':root'
+            Resource: '*'
+          - Action:
+              - kms:CreateGrant
+              - kms:Decrypt
+              - kms:DescribeKey
+              - kms:Encrypt
+              - kms:GenerateDataKey*
+              - kms:ReEncrypt*
+            Condition:
+              StringEquals:
+                kms:ViaService: !Join
+                  - ''
+                  - - secretsmanager.
+                    - !Ref AWS::Region
+                    - .amazonaws.com
+            Effect: Allow
+            Principal:
+              AWS: !Join
+                - ''
+                - - 'arn:'
+                  - !Ref AWS::Partition
+                  - ':iam::'
+                  - !Ref AWS::AccountId
+                  - ':root'
+            Resource: '*'
+        Version: '2012-10-17'
+      PendingWindowInDays: 7
+      Tags:
+        - Key: Name
+          Value: RetailStoreCustomKMSKey
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+  # KMS key and alias for encrypting sensitive data in the retail store ECS services
+  CustomKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/retail-store-ecs-cmk
+      TargetKeyId: !GetAtt CustomKMSKey.Arn
+
+  # Service discovery namespace for service connect
+  RetailStoreNamespace:
+    Type: AWS::ServiceDiscovery::HttpNamespace
+    Properties:
+      Name: retailstore.local
+      Description: Service Connect namespace for the retail store services
+
+  # add sg for cart service and see if it needs to allow traffic from the checkout/orders SG
+  CartServicesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the Cart ECS tasks.
+      GroupName: retail-store-cart-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+  
+  # Backend task SGs: allow the app port (8080) from the UI SG so Service Connect traffic reaches them
+  CatalogServicesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the Catalog ECS tasks.
+      GroupName: retail-store-catalog-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  OrderServicesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the Orders ECS tasks.
+      GroupName: retail-store-order-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  CheckoutServicesSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the Checkout ECS tasks.
+      GroupName: retail-store-checkout-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Checkout calls Orders (RETAIL_CHECKOUT_ENDPOINTS_ORDERS=http://orders); separate rule avoids a circular SG dependency
+  OrdersFromCheckoutIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref OrderServicesSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref CheckoutServicesSecurityGroup
+
+# dbs and secrets and cluster should all be ready before these task definitions are created
+
+##---------------------------------------------
+# Orders resource definitions
+#----------------------------------------------
+
+  OrdersLogConfiguration:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-ecs-tasks-orders-service
+      RetentionInDays: 7  
+
+  OrderEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: orderEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ecsExpressTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${OrdersLogConfiguration}:*"
+              - Sid: SessionIntoEcsExpressOrderTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'                
+      Tags:
+        - Key: Name
+          Value: orderEcsTaskRole
+
+  OrdersEcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ordersEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: OrdersServiceParameterPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - kms:Decrypt
+                  - secretsmanager:GetSecretValue
+                  - ssm:GetParameters
+                Effect: Allow
+                Resource:
+                  - !GetAtt CustomKMSKey.Arn
+                  - !Join
+                    - ''
+                    - - 'arn:'
+                      - !Ref AWS::Partition
+                      - ':ssm:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':parameter'
+                      - !Ref OrderServiceDBEndpointParameter
+                  - !Ref OrderServiceDBCredentialsSecret
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${OrdersLogConfiguration}:*"                           
+      Tags:
+        - Key: Name
+          Value: ordersEcsTaskExecutionRole
+  
+  OrdersPostgresRdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Orders RDS instance
+      GroupName: retail-store-ecs-orders-rds
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic by default
+          IpProtocol: '-1'
+      SecurityGroupIngress:
+        - Description: Allow PostgreSQL access
+          FromPort: 5432
+          IpProtocol: tcp
+          SourceSecurityGroupId: !GetAtt OrderServicesSecurityGroup.GroupId
+          ToPort: 5432
+      Tags:
+        - Key: Name
+          Value: retail-store-ecs-orders-rds-sg
+      VpcId: !ImportValue VpcAId
+
+  OrderServiceDBEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /retail-store-ecs/orders/db-endpoint-postgres
+      Tags:
+        CreationDate: '2026-09-04'
+        Version: 1.0.14
+        WorkshopName: ECSImmersionDay
+      Type: String
+      Value: !Join
+        - ':'
+        - - !GetAtt OrdersServicePostgresRDSCluster.Endpoint.Address
+          - !GetAtt OrdersServicePostgresRDSCluster.Endpoint.Port
+
+  OrderServiceDBCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      GenerateSecretString:
+        ExcludePunctuation: true
+        GenerateStringKey: password
+        IncludeSpace: false
+        PasswordLength: 10
+        SecretStringTemplate: '{"username":"postgres"}'
+      KmsKeyId: !GetAtt CustomKMSKey.Arn
+      Name: retail-store-ecs-orders-db
+      Tags:
+        - Key: Name
+          Value: retail-store-ecs-orders-db
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+  OrderServiceDBCredentialsSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref OrderServiceDBCredentialsSecret
+      TargetId: !Ref OrdersServicePostgresRDSCluster
+      TargetType: AWS::RDS::DBCluster
+
+  OrdersServicePostgresRDSCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      CopyTagsToSnapshot: true
+      DBClusterIdentifier: retail-store-ecs-orders
+      DBClusterParameterGroupName: default.aurora-postgresql17
+      DBSubnetGroupName: !Ref OrdersPostgresDbClusterSubnets
+      DatabaseName: orders
+      DeletionProtection: false
+      Engine: aurora-postgresql
+      EngineVersion: '17.9'
+      MasterUserPassword: !Join
+        - ''
+        - - '{{resolve:secretsmanager:'
+          - !Ref OrderServiceDBCredentialsSecret
+          - ':SecretString:password::}}'
+      MasterUsername: !Join
+        - ''
+        - - '{{resolve:secretsmanager:'
+          - !Ref OrderServiceDBCredentialsSecret
+          - ':SecretString:username::}}'
+      Port: 5432
+      ServerlessV2ScalingConfiguration:
+        MaxCapacity: 2
+        MinCapacity: 0.5
+      StorageEncrypted: true
+      Tags:
+        - Key: Name
+          Value: retail-store-ecs-orders
+      VpcSecurityGroupIds:
+        - !GetAtt OrdersPostgresRdsSecurityGroup.GroupId
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+  OrdersPostgresDbClusterSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for OrdersCluster Postgres database
+      SubnetIds:
+        - !ImportValue VpcAPrivateSubnetAZ1
+        - !ImportValue VpcAPrivateSubnetAZ2
+        - !ImportValue VpcAPrivateSubnetAZ3
+      Tags:
+        - Key: Name
+          Value: retail-store-ecs-orders-subnets
+
+  OrdersClusterRDSInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref OrdersServicePostgresRDSCluster
+      ## Workshop uses aurora serverless but Pluralsight SCP prevents using db.serverless class directly
+      # DBInstanceClass: db.serverless
+      DBInstanceClass: db.t4g.medium
+      Engine: aurora-postgresql
+      PromotionTier: 0
+      PubliclyAccessible: false
+      Tags:
+        - Key: environment-name
+          Value: retail-store-ecs
+        - Key: Name
+          Value: 'postgres-retail-store-ecs-orders'
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete  
+
+  OrdersTaskDefinition:
+    DependsOn: 
+      - OrderServiceDBEndpointParameter
+      - OrderServiceDBCredentialsSecret
+      - OrdersLogConfiguration
+      - OrdersClusterRDSInstance
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: retail-store-ecs-orders
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref OrdersEcsTaskExecutionRole
+      TaskRoleArn: !Ref OrderEcsTaskRole
+      ContainerDefinitions:
+        - Name: application
+          Image: public.ecr.aws/aws-containers/retail-store-sample-orders:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: !Ref OrderContainerPort
+              HostPort: !Ref OrderContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          VersionConsistency: disabled
+          Environment:
+            - Name: RETAIL_ORDERS_PERSISTENCE_PROVIDER
+              Value: postgres
+            - Name: RETAIL_ORDERS_MESSAGING_PROVIDER
+              Value: in-memory
+          Secrets:
+            - Name: RETAIL_ORDERS_PERSISTENCE_ENDPOINT
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/retail-store-ecs/orders/db-endpoint-postgres"
+            - Name: RETAIL_ORDERS_PERSISTENCE_NAME
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:retail-store-ecs-orders-db:dbname::"
+            - Name: RETAIL_ORDERS_PERSISTENCE_USERNAME
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:retail-store-ecs-orders-db:username::"
+            - Name: RETAIL_ORDERS_PERSISTENCE_PASSWORD
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:retail-store-ecs-orders-db:password::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref OrdersLogConfiguration
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: orders-service
+              awslogs-create-group: "true"
+
+  OrdersService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Ref OrderServiceName
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref OrdersTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref OrderServicesSecurityGroup
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !GetAtt RetailStoreNamespace.Arn
+        Services:
+          - PortName: application  # must be same as in the OrdersTaskDefinition
+            DiscoveryName: orders
+            ClientAliases:
+              - Port: 80
+                DnsName: orders
+  
+##---------------------------------------------
+# checkout resource definitions
+#----------------------------------------------  
+
+  CheckoutLogConfiguration:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-ecs-tasks-checkout-service
+      RetentionInDays: 7  
+
+  CheckoutEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: checkoutEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ecsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${CheckoutLogConfiguration}:*"
+              - Sid: SessionIntoCheckoutTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'                
+      Tags:
+        - Key: Name
+          Value: checkoutEcsTaskRole
+
+  CheckoutEcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: checkoutEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: CheckoutServiceParameterPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                  - kms:Decrypt
+                  - ssm:GetParameters
+                Effect: Allow
+                Resource:
+                  - !GetAtt CustomKMSKey.Arn
+                  - !Join
+                    - ''
+                    - - 'arn:'
+                      - !Ref AWS::Partition
+                      - ':ssm:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':parameter'
+                      - !Ref CheckoutRedisEndpointParameter
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CheckoutLogConfiguration}:*                       
+      Tags:
+        - Key: Name
+          Value: checkoutEcsTaskExecutionRole
+
+  CheckoutRedisEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /retail-store-ecs/checkout/redis-endpoint
+      Tags:
+        CreationDate: '2026-09-04'
+        Version: 1.0.14
+        WorkshopName: ECSImmersionDay
+      Type: String
+      Value: !Join
+        - ''
+        - - rediss://
+          - !Join
+            - ':'
+            - - !GetAtt CheckoutRedisCluster.Endpoint.Address
+              - !GetAtt CheckoutRedisCluster.Endpoint.Port
+ 
+  CheckoutRedisCluster:
+    Type: AWS::ElastiCache::ServerlessCache
+    Properties:
+      Description: Redis cluster for checkout service
+      Engine: redis
+      SecurityGroupIds:
+        - !GetAtt CheckoutRedisSecurityGroup.GroupId
+      ServerlessCacheName: retail-store-ecs-redis
+      SubnetIds:
+        - !ImportValue VpcAPrivateSubnetAZ1
+        - !ImportValue VpcAPrivateSubnetAZ2
+        - !ImportValue VpcAPrivateSubnetAZ3
+      Tags:
+        - Key: Name
+          Value: retail-store-ecs-redis
+    DeletionPolicy: Delete
+
+  CheckoutRedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Redis cluster
+      GroupName: retail-store-ecs-redis
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic by default
+          IpProtocol: '-1'
+      SecurityGroupIngress:
+        - Description: Allow Redis access
+          FromPort: 6379
+          IpProtocol: tcp
+          SourceSecurityGroupId: !GetAtt CheckoutServicesSecurityGroup.GroupId
+          ToPort: 6379
+      Tags:
+        - Key: Name
+          Value: retail-store-ecs-redis
+      VpcId: !ImportValue VpcAId
+ 
+  CheckoutTaskDefinition:
+    DependsOn:
+      - CheckoutRedisEndpointParameter
+      - CheckoutRedisCluster
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: retail-store-ecs-checkout
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref CheckoutEcsTaskExecutionRole
+      TaskRoleArn: !Ref CheckoutEcsTaskRole
+      ContainerDefinitions:
+        - Name: application
+          Image: public.ecr.aws/aws-containers/retail-store-sample-checkout:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: !Ref CheckoutContainerPort
+              HostPort: !Ref CheckoutContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          VersionConsistency: disabled
+          Environment:
+            - Name: RETAIL_CHECKOUT_PERSISTENCE_PROVIDER
+              Value: redis
+            - Name: RETAIL_CHECKOUT_ENDPOINTS_ORDERS
+              Value: http://orders
+          Secrets:
+            - Name: RETAIL_CHECKOUT_PERSISTENCE_REDIS_URL
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/retail-store-ecs/checkout/redis-endpoint"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CheckoutLogConfiguration
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: checkout-service
+              awslogs-create-group: "true"
+
+  CheckoutService:
+    DependsOn: 
+      - OrdersService   # checkout calls http://orders at startup
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Ref CheckoutServiceName
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref CheckoutTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref CheckoutServicesSecurityGroup
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !GetAtt RetailStoreNamespace.Arn
+        Services:
+          - PortName: application  # must be same as in the CheckoutTaskDefinition
+            DiscoveryName: checkout
+            ClientAliases:
+              - Port: 80
+                DnsName: checkout
+
+##---------------------------------------------
+# Catalog resource definitions
+#----------------------------------------------
+  
+  CatalogLogConfiguration:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-ecs-tasks-catalog-service
+      RetentionInDays: 7  
+  
+  CatalogEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: catalogEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CatalogEcsExpressTaskRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/${CatalogLogConfiguration}:*"            
+              - Sid: SessionIntoEcsExpressCatalogTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: catalogEcsTaskRole
+
+  CatalogEcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: catalogEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: CatalogEcsTaskExecutionRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - secretsmanager:GetSecretValue
+                  - ssm:GetParameters
+                Resource: 
+                  - !GetAtt CustomKMSKey.Arn
+                  - !Join
+                    - ''
+                    - - 'arn:'
+                      - !Ref AWS::Partition
+                      - ':ssm:'
+                      - !Ref AWS::Region
+                      - ':'
+                      - !Ref AWS::AccountId
+                      - ':parameter'
+                      - !Ref CatalogMySQLDBEndpointParameter
+                  - !Ref CatalogDBCredentialsSecret
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CatalogLogConfiguration}:*"                           
+      Tags:
+        - Key: Name
+          Value: catalogEcsTaskExecutionRole
+
+  CatalogDBCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      GenerateSecretString:
+        ExcludePunctuation: true
+        GenerateStringKey: password
+        IncludeSpace: false
+        PasswordLength: 10
+        SecretStringTemplate: '{"username":"root"}'
+      KmsKeyId: !GetAtt CustomKMSKey.Arn
+      Name: retail-store-ecs-catalog-db
+      Tags:
+        - Key: Name
+          Value: retail-store-ecs-catalog-db
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+  CatalogMySQLDBEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /retail-store-ecs/catalog/db-endpoint-mysql
+      Tags:
+        CreationDate: '2026-09-04'
+        Version: 1.0.14
+        WorkshopName: ECSImmersionDay
+      Type: String
+      Value: !Join
+        - ':'
+        - - !GetAtt CatalogMySqlDBCluster.Endpoint.Address
+          - !GetAtt CatalogMySqlDBCluster.Endpoint.Port
+
+  CatalogMySqlDBCluster:
+    Type: AWS::RDS::DBCluster
+    Properties:
+      CopyTagsToSnapshot: true
+      DBClusterIdentifier: retail-store-ecs-catalog
+      DBClusterParameterGroupName: !Ref CatalogDBClusterParams
+      DBSubnetGroupName: !Ref CatalogDBClusterSubnets
+      DatabaseName: catalog
+      DeletionProtection: false
+      Engine: aurora-mysql
+      EngineVersion: 8.4.mysql_aurora.8.4.7
+      MasterUserPassword: !Join
+        - ''
+        - - '{{resolve:secretsmanager:'
+          - !Ref CatalogDBCredentialsSecret
+          - ':SecretString:password::}}'
+      MasterUsername: !Join
+        - ''
+        - - '{{resolve:secretsmanager:'
+          - !Ref CatalogDBCredentialsSecret
+          - ':SecretString:username::}}'
+      ServerlessV2ScalingConfiguration:
+        MaxCapacity: 2
+        MinCapacity: 0.5
+      StorageEncrypted: true
+      Tags:
+        - Key: Name
+          Value: catalog
+      VpcSecurityGroupIds:
+        - !GetAtt CatalogRDSSecurityGroup.GroupId
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+  CatalogDBCredentialsSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref CatalogDBCredentialsSecret
+      TargetId: !Ref CatalogMySqlDBCluster
+      TargetType: AWS::RDS::DBCluster
+
+  CatalogClusterMySqlInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBClusterIdentifier: !Ref CatalogMySqlDBCluster
+      ## Workshop uses aurora serverless but Pluralsight SCP prevents using db.serverless class directly
+      # DBInstanceClass: db.serverless
+      DBInstanceClass: db.t4g.medium
+      Engine: aurora-mysql
+      PromotionTier: 0
+      PubliclyAccessible: false
+      Tags:
+        - Key: Name
+          Value: 'mysql-retail-store-ecs-catalog'
+        - Key: environment-name
+          Value: retail-store-ecs
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+   
+  CatalogRDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Catalog RDS instance
+      GroupName: retail-store-ecs-catalog-rds
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic by default
+          IpProtocol: '-1'
+      SecurityGroupIngress:
+        - Description: Allow MySQL access
+          FromPort: 3306
+          IpProtocol: tcp
+          SourceSecurityGroupId: !GetAtt CatalogServicesSecurityGroup.GroupId
+          # SourceSecurityGroupId: !GetAtt CatalogSecurityGroupIngress.GroupId
+          ToPort: 3306
+      Tags:
+        - Key: Name
+          Value: retail-store-ecs-catalog--mysqlrds-sg
+      VpcId: !ImportValue VpcAId
+
+  CatalogDBClusterParams:
+    Type: AWS::RDS::DBClusterParameterGroup
+    Properties:
+      Description: Cluster parameter group for aurora-mysql8.4
+      Family: aurora-mysql8.4
+      Parameters:
+        require_secure_transport: 'OFF'
+      Tags:
+        - Key: Name
+          Value: catalog-mysqlrds-parameter-group
+
+  CatalogDBClusterSubnets:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnets for CatalogCluster database
+      SubnetIds:
+        - !ImportValue VpcAPrivateSubnetAZ1
+        - !ImportValue VpcAPrivateSubnetAZ2
+        - !ImportValue VpcAPrivateSubnetAZ3
+      Tags:
+        - Key: Name
+          Value: catalog-mysqlrds-subnet-group  
+  
+  CatalogTaskDefinition:
+    DependsOn: 
+      - CatalogMySQLDBEndpointParameter
+      - CatalogLogConfiguration
+      - CatalogDBCredentialsSecret
+      - CatalogClusterMySqlInstance
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: retail-store-ecs-catalog
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref CatalogEcsTaskExecutionRole
+      TaskRoleArn: !Ref CatalogEcsTaskRole
+      ContainerDefinitions:
+        - Name: application
+          Image: public.ecr.aws/aws-containers/retail-store-sample-catalog:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: !Ref CatalogContainerPort
+              HostPort: !Ref CatalogContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          VersionConsistency: disabled
+          Environment:
+            - Name: RETAIL_CATALOG_PERSISTENCE_DB_NAME
+              Value: catalog
+            - Name: RETAIL_CATALOG_PERSISTENCE_PROVIDER
+              Value: mysql
+          Secrets:
+            - Name: RETAIL_CATALOG_PERSISTENCE_ENDPOINT
+              ValueFrom: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/retail-store-ecs/catalog/db-endpoint-mysql"
+            - Name: RETAIL_CATALOG_PERSISTENCE_PASSWORD
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:retail-store-ecs-catalog-db:password::"
+            - Name: RETAIL_CATALOG_PERSISTENCE_USER
+              ValueFrom: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:retail-store-ecs-catalog-db:username::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CatalogLogConfiguration
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: catalog-service
+              awslogs-create-group: "true"      
+
+  CatalogService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Ref CatalogServiceName
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref CatalogTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref CatalogServicesSecurityGroup
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: !GetAtt RetailStoreNamespace.Arn
+        Services:
+          - PortName: application # must be same as in the CatalogTaskDefinition
+            DiscoveryName: catalog
+            ClientAliases:
+              - Port: 80
+                DnsName: catalog   
+
+#----------------------------------------------------------------
+## Autoscaling Configuration for Retail Store 
+# sample Target Tracking [cpu, mem, ALB requests] autoscaling configuration for the UI service
+# I have added scheduled scaling as well
+# All of the scaling can be done for all other services as well
+#---------------------------------------------------------------
+  UiServiceScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: UiService
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub "service/${ClusterName}/${UiServiceName}"
+      MinCapacity: 2
+      MaxCapacity: 3
+      # # omit the  RoleARN lets Application Auto Scaling use its service-linked role automatically
+      # RoleARN: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  # Target-tracking policy: 1500 ALB requests per task before scaling out
+  UiServiceScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ui-scaling-policy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref UiServiceScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 1500
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          # ResourceLabel format: app/<alb>/<id>/targetgroup/<tg>/<id>
+          ResourceLabel: !Join
+            - "/"
+            - - !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+              - !GetAtt UiTargetGroup.TargetGroupFullName
+
+#--------------------------------------------------------------------------------------------------------------------
+# OTHERAUTOSCALING ARE SHOWN EXAMPLES BELOW
+# SEE: https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/AWS_ApplicationAutoScaling.html
+#
+##--------------------------------------------------------------------------------------------------------------------
+
+  # # CPU-based target tracking: keep average CPU at 75%
+  # UiServiceCpuScalingPolicy:
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   Properties:
+  #     PolicyName: ui-cpu-scaling
+  #     PolicyType: TargetTrackingScaling
+  #     ScalingTargetId: !Ref UiServiceScalableTarget
+  #     TargetTrackingScalingPolicyConfiguration:
+  #       TargetValue: 75
+  #       PredefinedMetricSpecification:
+  #         PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  # # Memory-based target tracking: keep average memory at 75%
+  # UiServiceMemoryScalingPolicy:
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   Properties:
+  #     PolicyName: ui-memory-scaling
+  #     PolicyType: TargetTrackingScaling
+  #     ScalingTargetId: !Ref UiServiceScalableTarget
+  #     TargetTrackingScalingPolicyConfiguration:
+  #       TargetValue: 75
+  #       PredefinedMetricSpecification:
+  #         PredefinedMetricType: ECSServiceAverageMemoryUtilization 
+
+  # # schedule scaling  to run in 30 days time from today sept 27, 2026
+  # UiServiceScalableTarget:
+  #   Type: AWS::ApplicationAutoScaling::ScalableTarget
+  #   DependsOn: UiService
+  #   Properties:
+  #     ServiceNamespace: ecs
+  #     ScalableDimension: ecs:service:DesiredCount
+  #     ResourceId: !Sub "service/${ClusterName}/${UiServiceName}"
+  #     MinCapacity: 2
+  #     MaxCapacity: 10
+  #       # omit the above RoleARN lets Application Auto Scaling use its service-linked role automatically
+  #     # RoleARN: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+      
+  #     # define one or more scheduled actions. 
+  #     # Below are ideas/samples and not tested and some may conflict with each other
+  #     # One-time scheduled scale-out 30 days from 2026-09-27
+  #     ScheduledActions:
+  #       - ScheduledActionName: ui-scheduled-scale-out-2026-10-27
+  #         Schedule: "at(2026-10-27T00:00:00)"
+  #         Timezone: America/Toronto
+  #         ScalableTargetAction:
+  #           MinCapacity: 4
+  #           MaxCapacity: 12        
+  #       # scales up every morning
+  #       - ScalableTargetAction:
+  #           MinCapacity: 2
+  #           MaxCapacity: 4
+  #         Schedule: "cron(0 8 * * ? *)"  # every day at 8 AM UTC
+  #         ScheduledActionName: "ScaleUpMorning"
+  #         Timezone: Canada/Central
+  #       # scales down every evening
+  #       - ScalableTargetAction:
+  #           MinCapacity: 0
+  #           MaxCapacity: 0
+  #         Schedule: "cron(0 17 ? * MON-SUN *)"  # every day at 5 PM UTC
+  #         ScheduledActionName: "ScaleDownEvening"
+  #         Timezone: Canada/Central
+  #       # Winnipeg 8am–10am window: raise capacity at 08:00, restore at 10:00
+  #       - ScheduledActionName: WinnipegWindowScaleUp
+  #         Schedule: "cron(0 8 * * ? *)"
+  #         Timezone: America/Winnipeg
+  #         ScalableTargetAction:
+  #           MinCapacity: 4
+  #           MaxCapacity: 10
+  #       - ScheduledActionName: WinnipegWindowScaleDown
+  #         Schedule: "cron(0 10 * * ? *)"
+  #         Timezone: America/Winnipeg
+  #         ScalableTargetAction:
+  #           MinCapacity: 2
+  #           MaxCapacity: 4          
