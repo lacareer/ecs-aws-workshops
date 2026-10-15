@@ -1,0 +1,461 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECS Managed Instances workshop - cluster, IAM roles, security group, and capacity provider.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster.
+
+  CapacityProviderName:
+    Type: String
+    Default: retail-store-ecs-cluster-managed-instances-cp
+    Description: Name of the managed instances capacity provider.
+
+  CapacityProvider:
+    Type: String
+    Default: FARGATE_SPOT
+    Description: Name of the capacity provider (e.g., FARGATE or FARGATE_SPOT).
+    AllowedValues:
+      - FARGATE
+      - FARGATE_SPOT
+
+  StorageSizeGiB:
+    Type: Number
+    Default: 100
+    MinValue: 30
+    MaxValue: 16384
+    Description: EBS volume size for managed instances.
+
+Resources:
+  # Role AWS assumes to provision/manage the instances on your behalf
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInfrastructureRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+      Policies:
+        - PolicyName: passInstanceRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EcsInstanceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com        
+
+  # Role the EC2 managed instances themselves run with
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: ecsManagedInstancesInstanceProfile
+      Roles:
+        - !Ref EcsInstanceRole
+
+  # Public-facing ALB security group
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the UI ALB.
+      GroupName: retail-store-ui-alb-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Let the ALB reach UI task ENIs on 8080 (awsvpc → ip targets)
+  UiManagedInstanceTaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ui-facing ECS Managed Instances tasks.
+      GroupName: ui-retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ui-retail-store-alb
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue VpcAPublicSubnetAZ1
+        - !ImportValue VpcAPublicSubnetAZ2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  UiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-tg
+      VpcId: !ImportValue VpcAId
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip          # awsvpc tasks register as IP targets
+      HealthCheckPath: /actuator/health
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UiTargetGroup
+
+  UiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: ui-retail-store-app-ecs
+      RetentionInDays: 7
+
+  # Lets the ECS agent pull images and write logs
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowWriteUiLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${UiLogGroup}:*"
+
+  # Role the container assumes at runtime (empty for now; add app permissions as needed)
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TaskCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${UiLogGroup}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'             
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced   # enhanced observability, as the workshop specifies
+
+  ManagedInstancesCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: !Ref CapacityProviderName
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        InstanceLaunchTemplate:
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          NetworkConfiguration:
+            Subnets:
+              - !ImportValue VpcAPrivateSubnetAZ1
+              - !ImportValue VpcAPrivateSubnetAZ2
+              - !ImportValue VpcAPrivateSubnetAZ3
+            SecurityGroups:
+              - !Ref UiManagedInstanceTaskSg
+          StorageConfiguration:
+            StorageSizeGiB: !Ref StorageSizeGiB
+          Monitoring: DETAILED   # detailed = 1-min CloudWatch metrics, as the workshop uses
+
+  # # # The workshop mentioned is optional and the whole stack will still work without it. 
+  # # # Readup capacity providers documentation for more details.
+  # # # make sure to comment it in the UiService DependsOn section 
+  # # # if you want to enforce the dependency on the cluster capacity providers.
+  # ClusterCapacityProviders:
+  #   Type: AWS::ECS::ClusterCapacityProviderAssociations
+  #   DependsOn: ManagedInstancesCapacityProvider
+  #   Properties:
+  #     Cluster: !Ref EcsCluster
+  #     CapacityProviders:
+  #       - !Ref CapacityProviderName
+  #     DefaultCapacityProviderStrategy:
+  #       - CapacityProvider: !Ref CapacityProviderName
+  #         Weight: 1
+
+  UiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: UiLogGroup
+    Properties:
+      Family: retail-store-ecs-ui
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      Cpu: "1024"
+      Memory: "2048"
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: application
+          Image: public.ecr.aws/aws-containers/retail-store-sample-ui:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: 8080
+              HostPort: 8080
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ui-service
+
+  UiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AlbListener
+      # - ClusterCapacityProviders
+    Properties:
+      ServiceName: ui
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref UiTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: true 
+      # CapacityProviderStrategy:
+      #   - CapacityProvider: !Ref CapacityProviderName
+      #     Weight: 1
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref ManagedInstancesCapacityProvider
+          Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+            - !ImportValue VpcAPrivateSubnetAZ3
+          SecurityGroups:
+            - !Ref UiManagedInstanceTaskSg
+      LoadBalancers:
+        - TargetGroupArn: !Ref UiTargetGroup
+          ContainerName: application
+          ContainerPort: 8080
+
+#----------------------------------------------------------------
+## Autoscaling Configuration for Retail Store 
+# sample Target Tracking [cpu, mem, ALB requests] autoscaling configuration for the UI service
+# I have added scheduled scaling as well
+# All of the scaling can be done for all other services as well
+#---------------------------------------------------------------
+  UiServiceScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: UiService
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub "service/${ClusterName}/${UiService.Name}"
+      MinCapacity: 1
+      MaxCapacity: 3
+      # # omit the  RoleARN lets Application Auto Scaling use its service-linked role automatically
+      # RoleARN: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+
+  # Target-tracking policy: 1500 ALB requests per task before scaling out
+  UiServiceScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: ui-scaling-policy
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref UiServiceScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 1500
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ALBRequestCountPerTarget
+          # ResourceLabel format: app/<alb>/<id>/targetgroup/<tg>/<id>
+          ResourceLabel: !Join
+            - "/"
+            - - !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+              - !GetAtt UiTargetGroup.TargetGroupFullName
+
+#--------------------------------------------------------------------------------------------------------------------
+# OTHERAUTOSCALING ARE SHOWN EXAMPLES BELOW
+# SEE: https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/AWS_ApplicationAutoScaling.html
+#
+##--------------------------------------------------------------------------------------------------------------------
+
+  # # CPU-based target tracking: keep average CPU at 75%
+  # UiServiceCpuScalingPolicy:
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   Properties:
+  #     PolicyName: ui-cpu-scaling
+  #     PolicyType: TargetTrackingScaling
+  #     ScalingTargetId: !Ref UiServiceScalableTarget
+  #     TargetTrackingScalingPolicyConfiguration:
+  #       TargetValue: 75
+  #       PredefinedMetricSpecification:
+  #         PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  # # Memory-based target tracking: keep average memory at 75%
+  # UiServiceMemoryScalingPolicy:
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   Properties:
+  #     PolicyName: ui-memory-scaling
+  #     PolicyType: TargetTrackingScaling
+  #     ScalingTargetId: !Ref UiServiceScalableTarget
+  #     TargetTrackingScalingPolicyConfiguration:
+  #       TargetValue: 75
+  #       PredefinedMetricSpecification:
+  #         PredefinedMetricType: ECSServiceAverageMemoryUtilization 
+
+  # # schedule scaling  to run in 30 days time from today sept 27, 2026
+  # UiServiceScalableTarget:
+  #   Type: AWS::ApplicationAutoScaling::ScalableTarget
+  #   DependsOn: UiService
+  #   Properties:
+  #     ServiceNamespace: ecs
+  #     ScalableDimension: ecs:service:DesiredCount
+  #     ResourceId: !Sub "service/${ClusterName}/${UiServiceName}"
+  #     MinCapacity: 2
+  #     MaxCapacity: 10
+  #       # omit the above RoleARN lets Application Auto Scaling use its service-linked role automatically
+  #     # RoleARN: !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService"
+      
+  #     # define one or more scheduled actions. 
+  #     # Below are ideas/samples and not tested and some may conflict with each other
+  #     # One-time scheduled scale-out 30 days from 2026-09-27
+  #     ScheduledActions:
+  #       - ScheduledActionName: ui-scheduled-scale-out-2026-10-27
+  #         Schedule: "at(2026-10-27T00:00:00)"
+  #         Timezone: America/Toronto
+  #         ScalableTargetAction:
+  #           MinCapacity: 4
+  #           MaxCapacity: 12        
+  #       # scales up every morning
+  #       - ScalableTargetAction:
+  #           MinCapacity: 2
+  #           MaxCapacity: 4
+  #         Schedule: "cron(0 8 * * ? *)"  # every day at 8 AM UTC
+  #         ScheduledActionName: "ScaleUpMorning"
+  #         Timezone: Canada/Central
+  #       # scales down every evening
+  #       - ScalableTargetAction:
+  #           MinCapacity: 0
+  #           MaxCapacity: 0
+  #         Schedule: "cron(0 17 ? * MON-SUN *)"  # every day at 5 PM UTC
+  #         ScheduledActionName: "ScaleDownEvening"
+  #         Timezone: Canada/Central
+  #       # Winnipeg 8am–10am window: raise capacity at 08:00, restore at 10:00
+  #       - ScheduledActionName: WinnipegWindowScaleUp
+  #         Schedule: "cron(0 8 * * ? *)"
+  #         Timezone: America/Winnipeg
+  #         ScalableTargetAction:
+  #           MinCapacity: 4
+  #           MaxCapacity: 10
+  #       - ScheduledActionName: WinnipegWindowScaleDown
+  #         Schedule: "cron(0 10 * * ? *)"
+  #         Timezone: America/Winnipeg
+  #         ScalableTargetAction:
+  #           MinCapacity: 2
+  #           MaxCapacity: 4          
+
+
+Outputs:
+  ClusterName:
+    Value: !Ref EcsCluster
+  ClusterArn:
+    Value: !GetAtt EcsCluster.Arn
+  CapacityProviderArn:
+    Value: !Ref ManagedInstancesCapacityProvider
+  InfrastructureRoleArn:
+    Value: !GetAtt EcsInfrastructureRole.Arn
+  InstanceProfileArn:
+    Value: !GetAtt EcsInstanceProfile.Arn
+  UiAlbUrl:
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"    
+  UiScalableTargetId:
+    Value: !Ref UiServiceScalableTarget
+  UiScalingPolicyArn:
+    Value: !Ref UiServiceScalingPolicy

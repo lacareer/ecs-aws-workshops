@@ -1,0 +1,305 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECS Managed Instances workshop - cluster, IAM roles, security group, and capacity provider.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster.
+
+  DDBTableName:
+    Type: String
+    Default: retail-store-cart-table
+    Description: Name of the DynamoDB table for carts.
+
+  CapacityProviderName:
+    Type: String
+    Default: retail-store-ecs-cluster-managed-instances-cp
+    Description: Name of the managed instances capacity provider.
+
+  CapacityProvider:
+    Type: String
+    Default: FARGATE_SPOT
+    Description: Name of the capacity provider (e.g., FARGATE or FARGATE_SPOT).
+    AllowedValues:
+      - FARGATE
+      - FARGATE_SPOT
+
+  StorageSizeGiB:
+    Type: Number
+    Default: 100
+    MinValue: 30
+    MaxValue: 16384
+    Description: EBS volume size for managed instances.
+
+Resources:
+  # Role AWS assumes to provision/manage the instances on your behalf
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInfrastructureRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+      Policies:
+        - PolicyName: passInstanceRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EcsInstanceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com        
+
+  # Role the EC2 managed instances themselves run with
+  # Note that this can be unique/different for each capacity provider expecially when the instances require different IAM permissions.
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: ecsManagedInstancesInstanceProfile
+      Roles:
+        - !Ref EcsInstanceRole
+                  
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced   # enhanced observability, as the workshop specifies
+
+  ImageBuilderLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-image-builder-ecs
+      RetentionInDays: 7
+
+  # Build task needs outbound only (GitHub clone + ECR push); no inbound
+  ImageBuilderTaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the privileged image-builder ECS task.
+      GroupName: retail-store-image-builder-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowWriteUiLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${ImageBuilderLogGroup}:*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:   
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TaskCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${ImageBuilderLogGroup}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*' 
+        - PolicyName: retailStoreImageBuilderEcrPush
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken   # must be on * (account-level token)
+                Resource: "*"
+              - Sid: EcrPushPull
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: !GetAtt RetailStoreUiEcrRepository.Arn                
+
+  RetailStoreUiEcrRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: retail-store-app-ui
+      ImageScanningConfiguration:
+        ScanOnPush: true    
+
+  ImageBuilderTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: ImageBuilderLogGroup
+    Properties:
+      Family: retail-store-image-builder
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      Cpu: "2048"
+      Memory: "4096"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: dockersocket   # shared Docker socket between dind daemon and cli
+          Host: {}
+      ContainerDefinitions:
+        - Name: dind
+          Image: public.ecr.aws/docker/library/docker:dind
+          Privileged: true   # only the daemon needs elevated access
+          Command:
+            - "--host=unix:///socket/docker.sock"
+          MountPoints:
+            - SourceVolume: dockersocket
+              ContainerPath: /socket
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - docker ps >/dev/null 2>&1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 10
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ImageBuilderLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: dind
+        - Name: builder
+          Image: public.ecr.aws/docker/library/docker:cli
+          Essential: true
+          DependsOn:
+            - ContainerName: dind
+              Condition: HEALTHY
+          Command:
+            - sh
+            - -c
+            - "apk add --no-cache git aws-cli bash && git clone https://github.com/aws-containers/retail-store-sample-app.git /workspace && cd /workspace/src/ui && aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com && docker build -t retail-store-app-ui:latest . && docker tag retail-store-app-ui:latest $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/retail-store-app-ui:latest && docker push $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/retail-store-app-ui:latest && echo 'Build and push completed successfully'"
+          Environment:
+            - Name: DOCKER_HOST
+              Value: unix:///socket/docker.sock
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: AWS_ACCOUNT_ID
+              Value: !Ref AWS::AccountId
+          MountPoints:
+            - SourceVolume: dockersocket
+              ContainerPath: /socket
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref ImageBuilderLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ui-builder          
+
+  ManagedInstancesCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: !Ref CapacityProviderName
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        InstanceLaunchTemplate:
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          NetworkConfiguration:
+            Subnets:
+              - !ImportValue VpcAPrivateSubnetAZ1
+              - !ImportValue VpcAPrivateSubnetAZ2
+              - !ImportValue VpcAPrivateSubnetAZ3
+            SecurityGroups:
+              - !Ref ImageBuilderTaskSg
+          StorageConfiguration:
+            StorageSizeGiB: !Ref StorageSizeGiB
+          Monitoring: DETAILED   # detailed = 1-min CloudWatch metrics, as the workshop uses              
+
+
+
+  # UiService:
+  #   Type: AWS::ECS::Service
+  #   Properties:
+  #     ServiceName: ui
+  #     Cluster: !Ref EcsCluster
+  #     TaskDefinition: !Ref ImageBuilderTaskDefinition
+  #     DesiredCount: 1
+  #     EnableExecuteCommand: true 
+  #     CapacityProviderStrategy:
+  #       - CapacityProvider: !Ref ManagedInstancesCapacityProvider
+  #         Weight: 1
+  #     NetworkConfiguration:
+  #       AwsvpcConfiguration:
+  #         AssignPublicIp: DISABLED
+  #         Subnets:
+  #           - !ImportValue VpcAPrivateSubnetAZ1
+  #           - !ImportValue VpcAPrivateSubnetAZ2
+  #           - !ImportValue VpcAPrivateSubnetAZ3
+  #         SecurityGroups:
+  #           - !Ref ImageBuilderTaskSg
+  #     # LoadBalancers:
+  #     #   - TargetGroupArn: !Ref UiTargetGroup
+  #     #     ContainerName: application
+  #     #     ContainerPort: 8080        

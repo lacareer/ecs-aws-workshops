@@ -1,0 +1,412 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECS Managed Instances workshop - cluster, IAM roles, security group, and capacity provider.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster.
+
+  CapacityProviderName:
+    Type: String
+    Default: retail-store-ecs-cluster-managed-instances-cp
+    Description: Name of the managed instances capacity provider.
+
+  CapacityProvider:
+    Type: String
+    Default: FARGATE_SPOT
+    Description: Name of the capacity provider (e.g., FARGATE or FARGATE_SPOT).
+    AllowedValues:
+      - FARGATE
+      - FARGATE_SPOT
+
+  StorageSizeGiB:
+    Type: Number
+    Default: 30
+    MinValue: 30
+    MaxValue: 16384
+    Description: EBS volume size for managed instances.
+
+Resources:
+  # Role AWS assumes to provision/manage the instances on your behalf
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInfrastructureRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+      Policies:
+        - PolicyName: passInstanceRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EcsInstanceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com        
+
+  # Role the EC2 managed instances themselves run with
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: ecsManagedInstancesInstanceProfile
+      Roles:
+        - !Ref EcsInstanceRole
+
+  # Public-facing ALB security group
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the UI ALB.
+      GroupName: retail-store-ui-alb-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Let the ALB reach UI task ENIs on 8080 (awsvpc → ip targets)
+  UiManagedInstanceTaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ui-facing ECS Managed Instances tasks.
+      GroupName: ui-retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ui-retail-store-alb
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue VpcAPublicSubnetAZ1
+        - !ImportValue VpcAPublicSubnetAZ2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  UiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-tg
+      VpcId: !ImportValue VpcAId
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip          # awsvpc tasks register as IP targets
+      HealthCheckPath: /actuator/health
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UiTargetGroup
+
+  UiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: ui-retail-store-app-ecs
+      RetentionInDays: 7
+
+  # Lets the ECS agent pull images and write logs
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowWriteUiLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${UiLogGroup}:*"
+
+  # Role the container assumes at runtime (empty for now; add app permissions as needed)
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TaskCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${UiLogGroup}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'             
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced   # enhanced observability, as the workshop specifies
+
+  ManagedInstancesCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: !Ref CapacityProviderName
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        InstanceLaunchTemplate:
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          NetworkConfiguration:
+            Subnets:
+              - !ImportValue VpcAPrivateSubnetAZ1
+              - !ImportValue VpcAPrivateSubnetAZ2
+              - !ImportValue VpcAPrivateSubnetAZ3
+            SecurityGroups:
+              - !Ref UiManagedInstanceTaskSg
+          StorageConfiguration:
+            StorageSizeGiB: !Ref StorageSizeGiB
+          Monitoring: DETAILED   # detailed = 1-min CloudWatch metrics, as the workshop uses
+
+  UiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: UiLogGroup
+    Properties:
+      Family: retail-store-ecs-ui
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      Cpu: "1024"
+      Memory: "2048"
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: application
+          Image: public.ecr.aws/aws-containers/retail-store-sample-ui:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: 8080
+              HostPort: 8080
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ui-service
+
+  UiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AlbListener
+      # - ClusterCapacityProviders
+    Properties:
+      ServiceName: ui
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref UiTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: true 
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref ManagedInstancesCapacityProvider
+          Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+            - !ImportValue VpcAPrivateSubnetAZ3
+          SecurityGroups:
+            - !Ref UiManagedInstanceTaskSg
+      LoadBalancers:
+        - TargetGroupArn: !Ref UiTargetGroup
+          ContainerName: application
+          ContainerPort: 8080
+
+  # Smaller-instance capacity provider used to make consolidation visible
+  ConsolidationTestCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: consolidation-test-cp
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        InstanceLaunchTemplate:
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          NetworkConfiguration:
+            Subnets:
+              - !ImportValue VpcAPrivateSubnetAZ1
+              - !ImportValue VpcAPrivateSubnetAZ2
+              - !ImportValue VpcAPrivateSubnetAZ3
+            SecurityGroups:
+              - !Ref UiManagedInstanceTaskSg
+          StorageConfiguration:
+            StorageSizeGiB: !Ref StorageSizeGiB
+          Monitoring: DETAILED
+          InstanceRequirements:
+            # any higher is not allowed by PluralSight           
+            VCpuCount:
+              Min: 1
+            MemoryMiB:
+              Min: 4
+            AllowedInstanceTypes:
+              - m7a.medium
+            # ## replacement to above restrictions by PS
+            # VCpuCount:
+            #   Min: 0
+            # MemoryMiB:
+            #   Min: 0
+            # AllowedInstanceTypes:
+            #   - "t3*"
+            #   - "t3a*" 
+            # BurstablePerformance: included # T-family is burstable; excluded by default
+           
+  ConsolidationTestTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: UiLogGroup
+    Properties:
+      Family: consolidation-test
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: nginx
+          Image: nginx:alpine
+          Essential: true
+          PortMappings:
+            - ContainerPort: 80
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiLogGroup          # reuses existing group so TaskExecutionRole can write
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: consolidation-test
+
+  ConsolidationTestService1:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: consolidation-test-1
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref ConsolidationTestTaskDefinition
+      DesiredCount: 2                                   # scale to 1 (CLI or template) to trigger consolidation
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref ConsolidationTestCapacityProvider
+          Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+            - !ImportValue VpcAPrivateSubnetAZ3
+          SecurityGroups:
+            - !Ref UiManagedInstanceTaskSg
+
+  ConsolidationTestService2:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: consolidation-test-2
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref ConsolidationTestTaskDefinition
+      DesiredCount: 2
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref ConsolidationTestCapacityProvider
+          Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+            - !ImportValue VpcAPrivateSubnetAZ3
+          SecurityGroups:
+            - !Ref UiManagedInstanceTaskSg
+

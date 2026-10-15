@@ -1,6 +1,19 @@
 NOTE THAT THE CART SERVICE WAS NOT DEPLOYED IN THIS MODULE BUT THE CART STILL WORKS
 THERE MUST BE SOMETHING ON THECODE SIDE FOR THIS REASON
 
+# FOR MORE SERVICE CONNECT EXAMPLES,TESTING SERVICE TO SERVICE CONNECTION, AND DIFFERENCE BETWEEN SERVICE CONNECT AND CLOUDMAPS:
+
+- 03-ecs-deep-dive/04-managed-instances/02-compute-capabilities/01-mem-optimized-with-SD/managed-instances.yaml [cloudmap sample ]
+
+- 03-ecs-deep-dive/04-managed-instances/05-service-connect/01-service-connect/service-connect-v1.yaml [service connect]
+
+- 03-ecs-deep-dive/04-managed-instances/05-service-connect/01-service-connect/service-connect-v2.yaml [service connect sample]
+
+- 03-ecs-deep-dive/04-managed-instances/06-observability/cloudmap-v3.yaml [cloudmap sample]
+
+- Make sure to read the README files for each folder to see the difference between AWS::ServiceDiscovery::HttpNamespace and AWS::ServiceDiscovery::PrivateDnsNamespace with how they are defined
+
+
 
 ALSO, WHEN A STACK THAT HAS SERVICE CONNECT IS DELETED, THE NAMESPACE IS NOT. GO TO AWS CLOUD MAP, FIND THE NAMESPACE, AND DELETE. 
 THIS DELETES IT COMPLETELY AND IT IS NO LONGER VISIBLE BOTH IN CLOUD MAP NOR ECS -> NAMESPACE

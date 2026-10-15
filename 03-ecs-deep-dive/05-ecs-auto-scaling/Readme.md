@@ -1,0 +1,1 @@
+Refere to 02-ecs-3-tier-architecture/03-autoscaling-on-traffic to learn about ECS Auto-Scaling features

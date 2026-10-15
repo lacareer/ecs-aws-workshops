@@ -1,0 +1,269 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECS Managed Instances workshop - cluster, IAM roles, security group, and capacity provider.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster.
+
+  DDBTableName:
+    Type: String
+    Default: retail-store-cart-table
+    Description: Name of the DynamoDB table for carts.
+
+  CapacityProviderName:
+    Type: String
+    Default: retail-store-ecs-cluster-managed-instances-cp
+    Description: Name of the managed instances capacity provider.
+
+  CapacityProvider:
+    Type: String
+    Default: FARGATE_SPOT
+    Description: Name of the capacity provider (e.g., FARGATE or FARGATE_SPOT).
+    AllowedValues:
+      - FARGATE
+      - FARGATE_SPOT
+
+  StorageSizeGiB:
+    Type: Number
+    Default: 100
+    MinValue: 30
+    MaxValue: 16384
+    Description: EBS volume size for managed instances.
+
+Resources:
+  # Role AWS assumes to provision/manage the instances on your behalf
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInfrastructureRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+      Policies:
+        - PolicyName: passInstanceRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EcsInstanceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com        
+
+  # Role the EC2 managed instances themselves run with
+  # Note that this can be unique/different for each capacity provider expecially when the instances require different IAM permissions.
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: ecsManagedInstancesInstanceProfile
+      Roles:
+        - !Ref EcsInstanceRole
+                  
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced   # enhanced observability, as the workshop specifies
+
+  NeuronInferenceLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: neuron-retail-store-app-ecs
+      RetentionInDays: 7
+
+  NeuronInferenceTaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the Neuron inference ECS tasks.
+      GroupName: neuron-inference-retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowWriteUiLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${NeuronInferenceLogGroup}:*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:   
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TaskCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${NeuronInferenceLogGroup}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*' 
+
+  # inference accelerator = AWS Inferentia (Neuron); swap to trn1.*/trn2.* for Trainium training
+  NeuronInferentiaCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: neuron-inferentia-cp
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        InstanceLaunchTemplate:
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          NetworkConfiguration:
+            Subnets:
+              - !ImportValue VpcAPrivateSubnetAZ1
+              - !ImportValue VpcAPrivateSubnetAZ2
+              - !ImportValue VpcAPrivateSubnetAZ3
+            SecurityGroups:
+              - !Ref NeuronInferenceTaskSg
+          StorageConfiguration:
+            StorageSizeGiB: !Ref StorageSizeGiB
+          Monitoring: DETAILED
+          InstanceRequirements:
+            VCpuCount:
+              Min: 4
+            MemoryMiB:
+              Min: 16384
+            AcceleratorTypes:
+              - inference
+            AcceleratorManufacturers:
+              - amazon-web-services
+            AllowedInstanceTypes:
+              - "inf2.*"
+
+  NeuronInferenceTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: NeuronInferenceLogGroup
+    Properties:
+      Family: neuron-inference
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      Cpu: "4096"
+      Memory: "11264"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: neuron-inference
+          Image: public.ecr.aws/neuron/pytorch-inference-vllm-neuronx:0.16.0-neuronx-py312-sdk2.30.0-ubuntu24.04
+          Essential: true
+          Command:
+            - vllm
+            - serve
+            - "--model=Qwen/Qwen2.5-0.5B-Instruct"
+            - "--max-num-seqs=4"
+            - "--max-model-len=128"
+            - "--tensor-parallel-size=2"
+            - "--block-size=32"
+            - "--num-gpu-blocks-override=16"
+            - "--port=8080"
+            - '--additional-config={"override_neuron_config":{"enable_bucketing":false}}'
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          ResourceRequirements:
+            - Type: NeuronDevice   # ALL = exclusive access to every Neuron device; one task per instance
+              Value: "ALL"
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/health || exit 1
+            Interval: 60
+            Timeout: 10
+            Retries: 10
+            StartPeriod: 300   # Neuron compiles the model on first start; allow ~15 min total
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref NeuronInferenceLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: neuron-inference
+
+  NeuronInferenceService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: neuron-inference
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref NeuronInferenceTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: true
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref NeuronInferentiaCapacityProvider
+          Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+            - !ImportValue VpcAPrivateSubnetAZ3
+          SecurityGroups:
+            - !Ref NeuronInferenceTaskSg

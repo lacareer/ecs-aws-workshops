@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECS Managed Instances workshop - cluster, IAM roles, security group, and capacity provider.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster.
+
+  DDBTableName:
+    Type: String
+    Default: retail-store-cart-table
+    Description: Name of the DynamoDB table for carts.
+
+  CapacityProviderName:
+    Type: String
+    Default: retail-store-ecs-cluster-managed-instances-cp
+    Description: Name of the managed instances capacity provider.
+
+  CapacityProvider:
+    Type: String
+    Default: FARGATE_SPOT
+    Description: Name of the capacity provider (e.g., FARGATE or FARGATE_SPOT).
+    AllowedValues:
+      - FARGATE
+      - FARGATE_SPOT
+
+  StorageSizeGiB:
+    Type: Number
+    Default: 100
+    MinValue: 30
+    MaxValue: 16384
+    Description: EBS volume size for managed instances.
+
+Resources:
+  # Role AWS assumes to provision/manage the instances on your behalf
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInfrastructureRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+      Policies:
+        - PolicyName: passInstanceRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EcsInstanceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com        
+
+  # Role the EC2 managed instances themselves run with
+  # Note that this can be unique/different for each capacity provider expecially when the instances require different IAM permissions.
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: ecsManagedInstancesInstanceProfile
+      Roles:
+        - !Ref EcsInstanceRole
+                  
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced   # enhanced observability, as the workshop specifies
+
+  OllamaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: ollama-retail-store-app-ecs
+      RetentionInDays: 7
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowWriteUiLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${OllamaLogGroup}:*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:   
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TaskCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${OllamaLogGroup}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*' 
+
+  GpuNvidiaCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: gpu-nvidia-cp
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        InstanceLaunchTemplate:
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          NetworkConfiguration:
+            Subnets:
+              - !ImportValue VpcAPrivateSubnetAZ1
+              - !ImportValue VpcAPrivateSubnetAZ2
+              - !ImportValue VpcAPrivateSubnetAZ3
+            SecurityGroups:
+              - !Ref OllamaTaskSg
+          StorageConfiguration:
+            StorageSizeGiB: !Ref StorageSizeGiB
+          Monitoring: DETAILED
+          InstanceRequirements:
+            VCpuCount:
+              Min: 2
+            MemoryMiB:
+              Min: 4096
+            AcceleratorTypes:
+              - gpu
+            AcceleratorManufacturers:
+              - nvidia
+            AllowedInstanceTypes:
+              - "g4dn.*"
+              - "g5.*"
+
+  OllamaTaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the Ollama GPU ECS tasks.
+      GroupName: ollama-retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 11434
+          ToPort: 11434
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  OllamaTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: OllamaLogGroup
+    Properties:
+      Family: ollama-llama
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      Cpu: "2048"
+      Memory: "4096"
+      ## The CPU and memory configuration for the task. Adjust these values based on your workload requirements.
+      ## PLuralSight only allows the smaller CPU and memory configuration for the task defined above.
+      # Cpu: "4096"
+      # Memory: "8192"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      Volumes:
+        - Name: ollama-data   # local Docker volume for model storage
+      ContainerDefinitions:
+        - Name: ollama
+          Image: ollama/ollama:latest
+          Essential: true
+          PortMappings:
+            - ContainerPort: 11434
+              Protocol: tcp
+          MountPoints:
+            - SourceVolume: ollama-data
+              ContainerPath: /root/.ollama
+          ResourceRequirements:
+            - Type: GPU
+              Value: "1"
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - ollama list || exit 1
+            Interval: 30
+            Timeout: 10
+            Retries: 3
+            StartPeriod: 120
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref OllamaLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ollama
+        - Name: model-initializer
+          Image: curlimages/curl:latest
+          Essential: false
+          # It runs a tiny shell script that does three things, one after another (the && means "only continue if the previous step succeeded"):
+          # sleep 30 — Wait 30 seconds. This gives the main ollama container time to fully start up and be ready to accept requests.
+          # curl -X POST http://localhost:11434/api/pull -d '{"name":"llama3.2:1b"}' — Send a request to Ollama (running in the same task on port 11434) telling it to download the llama3.2:1b AI model. 
+          # Because both containers share the same task network, localhost reaches the Ollama container.
+          # echo 'Model download complete' — Print a confirmation message to the logs once the download finishes.             
+          Command:
+            - sh
+            - -c
+            - "sleep 30 && curl -X POST http://localhost:11434/api/pull -d '{\"name\":\"llama3.2:1b\"}' && echo 'Model download complete'"
+          DependsOn:
+            - ContainerName: ollama
+              Condition: START
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref OllamaLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: initializer    
+
+  OllamaService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: ollama
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref OllamaTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: true
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref GpuNvidiaCapacityProvider
+          Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+            - !ImportValue VpcAPrivateSubnetAZ3
+          SecurityGroups:
+            - !Ref OllamaTaskSg
+

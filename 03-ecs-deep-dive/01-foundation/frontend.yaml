@@ -1,0 +1,346 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "standing up an ECS Express Mode setup"
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster for Express Mode services.
+
+  UiServiceName:
+    Type: String
+    Default: ui
+    Description: Name of the ECS Express Mode service.
+
+  CatalogServiceName:
+    Type: String
+    Default: catalog
+    Description: Name of the ECS Express Mode catalog service.
+
+  CartServiceName:
+    Type: String
+    Default: cart
+    Description: Name of the ECS Express Mode cart service.
+
+  OrderServiceName:
+    Type: String
+    Default: order
+    Description: Name of the ECS Express Mode order service.
+
+  CheckoutServiceName:
+    Type: String
+    Default: checkout
+    Description: Name of the ECS Express Mode checkout service.
+
+  UiContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-ui:1.5.0
+    Description: Container image for the retail store UI.
+
+  CatalogContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-catalog:1.5.0
+    Description: Container image for the retail store catalog service.
+
+  CartContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-cart:1.5.0
+    Description: Container image for the retail store cart service.
+
+  OrderContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-orders:1.5.0
+    Description: Container image for the retail store order service.
+
+  CheckoutContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-checkout:1.5.0
+    Description: Container image for the retail store checkout service.
+
+  UiContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CatalogContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CartContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  OrderContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  CheckoutContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  UiHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  CatalogHealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Health check path exposed by the application. 
+
+
+  CartHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  OrderHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+  CheckoutHealthCheckPath:
+    Type: String
+    Default: /health
+    Description: Health check path exposed by the application. 
+
+  Cpu:
+    Type: String
+    Default: 2048
+    Description: CPU units for the ECS task.
+
+  Mem:
+    Type: String
+    Default: 4096
+    Description: Memory units for the ECS task.
+
+  UiTheme:
+    Type: String
+    Default: green
+    Description: Theme applied to the retail store UI (RETAIL_UI_THEME).
+
+Resources:
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: retail-store-alb
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue VpcAPublicSubnetAZ1
+        - !ImportValue VpcAPublicSubnetAZ2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ALB.
+      GroupName: retail-store-alb-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  UiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-tg
+      VpcId: !ImportValue VpcAId
+      Port: !Ref UiContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: !Ref UiHealthCheckPath
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  AlbHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UiTargetGroup
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ui-facing ECS tasks.
+      GroupName: retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # To use Container Insights with enhanced observability, set the containerInsights account setting to enhanced.
+  # To use Container Insights, set the containerInsights account setting to enabled.
+  # PluralSight account setting for Container Insights is enabled
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled # supported values are enhanced, enabled, and disabled
+
+  UiLogConfiguration:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-ecs-tasks-ui-service
+      RetentionInDays: 7
+
+  RetailStoreEcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowCreateTaskLogGroup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${UiLogConfiguration}:*         
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskExecutionRole
+
+  RetailStoreEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowFireLensCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${UiLogConfiguration}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'                
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskRole
+
+  UiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: retail-store-ecs-ui
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref RetailStoreEcsTaskExecutionRole
+      TaskRoleArn: !Ref RetailStoreEcsTaskRole
+      ContainerDefinitions:
+        - Name: application #same name as in the UiService LoadBalancers section
+          Image: public.ecr.aws/aws-containers/retail-store-sample-ui:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: !Ref UiContainerPort
+              HostPort: !Ref UiContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          VersionConsistency: disabled
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiLogConfiguration
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ui-service
+              # awslogs-create-group: "true"
+          Environment:
+            - Name: RETAIL_UI_THEME
+              Value: !Ref UiTheme            
+  
+  UiService:
+    Type: AWS::ECS::Service
+    # Service creation fails if the listener isn't attached to the target group yet
+    DependsOn: AlbHttpListener
+    Properties:
+      ServiceName: !Ref UiServiceName
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref UiTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      EnableExecuteCommand: true
+      LoadBalancers:
+        - TargetGroupArn: !Ref UiTargetGroup
+          ContainerName: application # same as in the UiTaskDefinition
+          ContainerPort: !Ref UiContainerPort
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref EcsSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref UiServiceName

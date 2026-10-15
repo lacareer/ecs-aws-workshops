@@ -1,0 +1,550 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: ECS Managed Instances workshop - cluster, IAM roles, security group, and capacity provider.
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster.
+
+  DDBTableName:
+    Type: String
+    Default: retail-store-cart-table
+    Description: Name of the DynamoDB table for carts.
+
+  CapacityProviderName:
+    Type: String
+    Default: retail-store-ecs-cluster-managed-instances-cp
+    Description: Name of the managed instances capacity provider.
+
+  CapacityProvider:
+    Type: String
+    Default: FARGATE_SPOT
+    Description: Name of the capacity provider (e.g., FARGATE or FARGATE_SPOT).
+    AllowedValues:
+      - FARGATE
+      - FARGATE_SPOT
+
+  StorageSizeGiB:
+    Type: Number
+    Default: 100
+    MinValue: 30
+    MaxValue: 16384
+    Description: EBS volume size for managed instances.
+
+Resources:
+  # Role AWS assumes to provision/manage the instances on your behalf
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInfrastructureRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances
+      Policies:
+        - PolicyName: passInstanceRole
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt EcsInstanceRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: ec2.amazonaws.com        
+
+  # Role the EC2 managed instances themselves run with
+  # Note that this can be unique/different for each capacity provider expecially when the instances require different IAM permissions.
+  EcsInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsManagedInstancesInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: ecsManagedInstancesInstanceProfile
+      Roles:
+        - !Ref EcsInstanceRole
+
+  # Public-facing ALB security group
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the UI ALB.
+      GroupName: retail-store-ui-alb-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Let the ALB reach UI task ENIs on 8080 (awsvpc → ip targets)
+  UiManagedInstanceTaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ui-facing ECS Managed Instances tasks.
+      GroupName: ui-retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: ui-retail-store-alb
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue VpcAPublicSubnetAZ1
+        - !ImportValue VpcAPublicSubnetAZ2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  UiTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-tg
+      VpcId: !ImportValue VpcAId
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip          # awsvpc tasks register as IP targets
+      HealthCheckPath: /actuator/health
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  AlbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref UiTargetGroup
+
+  UiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: ui-retail-store-app-ecs
+      RetentionInDays: 7
+
+  # Lets the ECS agent pull images and write logs
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowWriteUiLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${UiLogGroup}:*"
+
+  # Role the container assumes at runtime (empty for now; add app permissions as needed)
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreAppEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: retailStoreCartDynamoDbAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource: 
+                  - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DDBTableName}"      
+                  - !Sub "arn:${AWS::Partition}:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DDBTableName}/index/*"      
+        - PolicyName: retailStoreEcsTaskFireLensLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: TaskCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${UiLogGroup}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'             
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enhanced   # enhanced observability, as the workshop specifies
+
+  ManagedInstancesCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: !Ref CapacityProviderName
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        InstanceLaunchTemplate:
+          # Note that this can be unique/different for each capacity provider expecially when the instances require different IAM permissions.
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          NetworkConfiguration:
+            Subnets:
+              - !ImportValue VpcAPrivateSubnetAZ1
+              - !ImportValue VpcAPrivateSubnetAZ2
+              - !ImportValue VpcAPrivateSubnetAZ3
+            SecurityGroups:
+              - !Ref UiManagedInstanceTaskSg
+          StorageConfiguration:
+            StorageSizeGiB: !Ref StorageSizeGiB
+          Monitoring: DETAILED   # detailed = 1-min CloudWatch metrics, as the workshop uses      
+
+  MemoryOptimizedCapacityProvider:
+    Type: AWS::ECS::CapacityProvider
+    Properties:
+      Name: retail-store-ecs-cluster-memory-optimized-cp
+      ClusterName: !Ref EcsCluster
+      ManagedInstancesProvider:
+        InfrastructureRoleArn: !GetAtt EcsInfrastructureRole.Arn
+        InstanceLaunchTemplate:
+          # Note that this can be unique/different for each capacity provider expecially when the instances require different IAM permissions.
+          Ec2InstanceProfileArn: !GetAtt EcsInstanceProfile.Arn
+          NetworkConfiguration:
+            Subnets:
+              - !ImportValue VpcAPrivateSubnetAZ1
+              - !ImportValue VpcAPrivateSubnetAZ2
+              - !ImportValue VpcAPrivateSubnetAZ3
+            SecurityGroups:
+              - !Ref CartInstanceTaskSg
+          StorageConfiguration:
+            StorageSizeGiB: !Ref StorageSizeGiB
+          Monitoring: DETAILED
+          # <-- new: constrains to memory-optimized families r* instances -->
+          # But PluralSight sandbox only allows us to use t-family instances for  t2, t3, t3a, t4g in micro, small, and medium sizes
+          InstanceRequirements:
+            AllowedInstanceTypes:
+              # - "r6*"
+              # - "r7*"
+              # - "r8*"
+              - "t3*"
+              - "t3a*"
+            BurstablePerformance: included   # T-family is burstable; excluded by default              
+            # # <-- add here to show but list should match task definition cpu requirements -->
+            # CpuManufacturers:          
+            #   - intel
+            #   - amd            
+            VCpuCount:
+              Min: 0
+            MemoryMiB:
+              Min: 0   
+
+  # # The workshop mentioned is optional and the whole stack will still work without it. 
+  # # Readup capacity providers documentation for more details.
+  # # make sure to comment it in the UiService DependsOn section 
+  # # if you want to enforce the dependency on the cluster capacity providers.
+  # ClusterCapacityProviders:
+  #   Type: AWS::ECS::ClusterCapacityProviderAssociations
+  #   DependsOn:
+  #     - ManagedInstancesCapacityProvider
+  #     - MemoryOptimizedCapacityProvider
+  #   Properties:
+  #     Cluster: !Ref EcsCluster
+  #     CapacityProviders:
+  #       - !Ref CapacityProviderName
+  #       - !Ref MemoryOptimizedCapacityProvider
+  #     DefaultCapacityProviderStrategy:
+  #       - CapacityProvider: !Ref CapacityProviderName
+  #         Weight: 1
+
+  UiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: UiLogGroup
+    Properties:
+      Family: retail-store-ecs-ui
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      Cpu: "1024"
+      Memory: "2048"
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: application
+          Image: public.ecr.aws/aws-containers/retail-store-sample-ui:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: 8080
+              HostPort: 8080
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          Environment:
+            - Name: RETAIL_UI_ENDPOINTS_CARTS
+              Value: "http://carts.retailstore.local:8080"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ui-service
+
+  UiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - AlbListener
+      # - ClusterCapacityProviders
+      - CartDiscoveryService
+    Properties:
+      ServiceName: ui
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref UiTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: true 
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref ManagedInstancesCapacityProvider
+          Weight: 1
+      # CapacityProviderStrategy:
+      #   - CapacityProvider: !Ref CapacityProviderName
+      #     Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+            - !ImportValue VpcAPrivateSubnetAZ3
+          SecurityGroups:
+            - !Ref UiManagedInstanceTaskSg
+      LoadBalancers:
+        - TargetGroupArn: !Ref UiTargetGroup
+          ContainerName: application
+          ContainerPort: 8080
+
+  CartLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-cart-ecs
+      RetentionInDays: 7
+
+  CartInstanceTaskSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Cart ECS tasks
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref UiManagedInstanceTaskSg
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  CartTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: CartLogGroup
+    Properties:
+      Family: retail-store-ecs-cart
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - MANAGED_INSTANCES
+      Cpu: "1024"
+      Memory: "2048"
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: application
+          Image: public.ecr.aws/aws-containers/retail-store-sample-cart:1.3.0
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: 8080
+              HostPort: 8080
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          Environment:
+            - Name: RETAIL_CART_PERSISTENCE_DYNAMODB_TABLE_NAME
+              Value: retail-store-cart-table
+            - Name: RETAIL_CART_PERSISTENCE_PROVIDER
+              Value: dynamodb
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 60
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CartLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: cart-service      
+
+This template notes:
+
+# #AWS::ServiceDiscovery::PrivateDnsNamespace has no Service Connect sidecar unlike the Service Connect approach, tasks here run only your application container (no ecs-service-connect-agent), so you lose the automatic Service Connect metrics
+  RetailStoreNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: retailstore.local
+      Vpc: !ImportValue VpcAId
+
+  CartDiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Name: carts
+      NamespaceId: !GetAtt RetailStoreNamespace.Id
+      DnsConfig:
+        DnsRecords:
+          - Type: A
+            TTL: 60
+      HealthCheckCustomConfig:
+        FailureThreshold: 1
+
+  CartService: 
+    Type: AWS::ECS::Service
+    DependsOn:
+      # - ClusterCapacityProviders
+      - CartDiscoveryService
+    Properties:
+      ServiceName: cart
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref CartTaskDefinition
+      DesiredCount: 1
+      EnableExecuteCommand: true
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref MemoryOptimizedCapacityProvider
+          Weight: 1
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref CartInstanceTaskSg
+      ServiceRegistries:
+        - RegistryArn: !GetAtt CartDiscoveryService.Arn
+
+  CartsSecurityDynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: customerId
+          AttributeType: S
+      BillingMode: PAY_PER_REQUEST
+      GlobalSecondaryIndexes:
+        - IndexName: idx_global_customerId
+          KeySchema:
+            - AttributeName: customerId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      TableName: !Ref DDBTableName
+      Tags:
+        - Key: Name
+          Value: !Ref DDBTableName
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+Outputs:
+  ClusterName:
+    Value: !Ref EcsCluster
+  ClusterArn:
+    Value: !GetAtt EcsCluster.Arn
+  CapacityProviderArn:
+    Value: !Ref ManagedInstancesCapacityProvider
+  InfrastructureRoleArn:
+    Value: !GetAtt EcsInfrastructureRole.Arn
+  InstanceProfileArn:
+    Value: !GetAtt EcsInstanceProfile.Arn
+  UiAlbUrl:
+    Value: !Sub "http://${ApplicationLoadBalancer.DNSName}"    

@@ -1,0 +1,1 @@
+Refer to the ecs-aws-workshops/01-ecs-express-mode module to learn about ECS Express Mode
