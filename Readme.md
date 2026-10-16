@@ -3,8 +3,10 @@ The VPC used for all the labs must be deployed or exist before deploying any tem
 <!-- Prerequsisites -->
 - Deploy the VPC infrastructure 01-ecs-express-mode/cloudformation/pre-req/one-vpc.yaml. 
 
-- Wait for it to comlete  successfully
+- Wait for it to complete  successfully
 
-- Then import the public subnet for the ECS Express Mode infra, AWS::ECS::ExpressGatewayService, in express-mode.yaml
+- Then vpc resources are imported into various stack used throughout this workshop
 
-- Deploy express-mode.yaml. Waitfor it to comlete  successfully
+- For the VPC Lattices lab, deploy 01-ecs-express-mode/cloudformation/pre-req/lattice-vpc.yaml
+
+- Wait for it to complete  successfully

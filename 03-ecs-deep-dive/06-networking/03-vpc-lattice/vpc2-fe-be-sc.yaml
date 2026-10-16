@@ -1,0 +1,289 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "standing up an ECS Express Mode setup"
+
+Parameters:
+
+  CartServiceName:
+    Type: String
+    Default: cart
+    Description: Name of the ECS Express Mode cart service.
+
+  CartContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-cart:1.5.0
+    Description: Container image for the retail store cart service.
+
+  CartContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  Cpu:
+    Type: String
+    Default: 2048
+    Description: CPU units for the ECS task.
+
+  Mem:
+    Type: String
+    Default: 4096
+    Description: Memory units for the ECS task.
+    
+  CartHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application. 
+
+Resources:
+ # =========================================================
+  # Prerequisites: infra role, DynamoDB, task role
+  # =========================================================
+
+  # Role ECS assumes to register task IPs into the VPC Lattice target group
+  EcsInfraRoleVpcLattice:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsInfraRoleVpcLattice
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForVpcLattice
+
+  CartsVpcLatticeTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: retail-store-ecs-carts-vpclattice
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: customerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: idx_global_customerId
+          KeySchema:
+            - AttributeName: customerId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+  CartsVpcLatticeTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ECSImmesionDay_CartsVpcLatticeTaskRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CartsVpcLatticeDynamoDb
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:*                       # scoped to the carts table + indexes
+                Resource:
+                  - !GetAtt CartsVpcLatticeTable.Arn
+                  - !Sub "${CartsVpcLatticeTable.Arn}/index/*"
+
+  # Dedicated execution role so it doesn't clash with retailStoreEcsTaskExecutionRole from your VPC1 stack
+  CartsVpcLatticeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: cartsVpcLatticeEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  CartsVpcLatticeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-ecs-carts-vpclattice
+      RetentionInDays: 7
+
+  # Carts task SG in VPC2; VPC Lattice delivers traffic from its managed prefix list
+  CartsVpcLatticeSg:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the VPC Lattice carts ECS tasks.
+      GroupName: retail-store-ecs-carts-vpclattice
+      VpcId: !ImportValue VpcBId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref CartContainerPort
+          ToPort: !Ref CartContainerPort
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # =========================================================
+  # VPC Lattice: target group, service, listener,
+  #            service network + associations
+  # =========================================================
+
+  CartsTargetGroup:
+    Type: AWS::VpcLattice::TargetGroup
+    Properties:
+      Name: carts-target-group
+      Type: IP
+      Config:
+        Port: !Ref CartContainerPort
+        Protocol: HTTP
+        ProtocolVersion: HTTP1
+        IpAddressType: IPV4
+        VpcIdentifier: !ImportValue VpcBId          # carts runs in VPC2
+        HealthCheck:
+          Enabled: true
+          Path: !Ref CartHealthCheckPath            # /actuator/health on traffic port
+
+  CartsLatticeService:
+    Type: AWS::VpcLattice::Service
+    Properties:
+      Name: carts-service
+      AuthType: NONE
+
+  CartsListener:
+    Type: AWS::VpcLattice::Listener
+    Properties:
+      Name: carts-listener
+      Protocol: HTTPS
+      Port: 443
+      ServiceIdentifier: !Ref CartsLatticeService
+      DefaultAction:
+        Forward:
+          TargetGroups:
+            - TargetGroupIdentifier: !Ref CartsTargetGroup
+
+  EcsWorkshopServiceNetwork:
+    Type: AWS::VpcLattice::ServiceNetwork
+    Properties:
+      Name: ecs-workshop-service-network
+
+  # Put the carts service into the service network
+  CartsServiceNetworkAssociation:
+    Type: AWS::VpcLattice::ServiceNetworkServiceAssociation
+    Properties:
+      ServiceNetworkIdentifier: !Ref EcsWorkshopServiceNetwork
+      ServiceIdentifier: !Ref CartsLatticeService
+
+  # Associate VPC1 (consumer: IDE + UI) so it can resolve/reach the lattice service
+  Vpc1ServiceNetworkAssociation:
+    Type: AWS::VpcLattice::ServiceNetworkVpcAssociation
+    Properties:
+      ServiceNetworkIdentifier: !Ref EcsWorkshopServiceNetwork
+      VpcIdentifier: !ImportValue VpcAId
+
+  # =========================================================
+  # Deploy the Carts service (new cluster in VPC2)
+  # =========================================================
+
+  VpcLatticeEcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: vpc-lattice-ecs-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  CartsVpcLatticeTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: CartsVpcLatticeLogGroup
+    Properties:
+      Family: retail-store-ecs-carts-vpclattice
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt CartsVpcLatticeExecutionRole.Arn
+      TaskRoleArn: !GetAtt CartsVpcLatticeTaskRole.Arn
+      ContainerDefinitions:
+        - Name: application
+          Image: !Ref CartContainerImage            # workshop uses cart:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: !Ref CartContainerPort
+              HostPort: !Ref CartContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          Environment:
+            - Name: RETAIL_CART_PERSISTENCE_PROVIDER
+              Value: dynamodb
+            - Name: RETAIL_CART_PERSISTENCE_DYNAMODB_TABLE_NAME
+              Value: retail-store-ecs-carts-vpclattice
+            - Name: RETAIL_CART_PERSISTENCE_DYNAMODB_CREATE_TABLE
+              Value: "false"
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          VersionConsistency: disabled
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref CartsVpcLatticeLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: carts-service
+
+  CartsVpcLatticeEcsService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - CartsListener                    # ensure the Lattice plumbing exists before ECS registers targets
+      - CartsServiceNetworkAssociation
+    Properties:
+      ServiceName: carts-vpclattice
+      Cluster: !Ref VpcLatticeEcsCluster
+      TaskDefinition: !Ref CartsVpcLatticeTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      EnableExecuteCommand: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcBPrivateSubnetAZ1
+            - !ImportValue VpcBPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref CartsVpcLatticeSg
+      # ECS auto-registers task ENIs into the Lattice target group using the infra role
+      VpcLatticeConfigurations:
+        - RoleArn: !GetAtt EcsInfraRoleVpcLattice.Arn
+          TargetGroupArn: !Ref CartsTargetGroup
+          PortName: application
+
+Outputs:
+  CartsServiceDnsName:
+    Description: VPC Lattice service DNS for carts (curl https://<dns>/actuator/health from VPC1)
+    Value: !GetAtt CartsLatticeService.DnsEntry.DomainName
+  ServiceNetworkId:
+    Value: !Ref EcsWorkshopServiceNetwork
+  CartsTargetGroupArn:
+    Value: !Ref CartsTargetGroup

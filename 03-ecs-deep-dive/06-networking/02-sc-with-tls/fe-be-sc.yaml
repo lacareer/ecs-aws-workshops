@@ -2,6 +2,12 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: "standing up an ECS Express Mode setup"
 
 Parameters:
+
+  DomainName:
+    Type: String
+    Default: chuks.com
+    Description: Please enter a valid domain name you own for the ALB TLS certificate.
+
   ClusterName:
     Type: String
     Default: retail-store-ecs-cluster
@@ -124,11 +130,15 @@ Parameters:
     Description: Theme applied to the retail store UI (RETAIL_UI_THEME).
 
 Resources:
-
+# Note: this AlbTlsCertificate is only for browser→ALB HTTPS 
+# it's independent of the Service Connect mesh TLS (which uses the private CA directly via each service's Tls block and is unaffected by this error).
+# Service connect creates and manages its own TLS certificates automatically.
+# creation, rotation, and revocation are handled by the service itself once a service is deployed with TLS enabled.
   AlbTlsCertificate:
     Type: AWS::CertificateManager::Certificate
+    DependsOn: ServiceConnectCAActivation
     Properties:
-      DomainName: "*.elb.amazonaws.com"          # CN only; browsers will still warn (private CA, like the workshop)
+      DomainName: !Sub "*.${DomainName}"          # CN only; browsers will still warn (private CA, like the workshop)
       CertificateAuthorityArn: !Ref ServiceConnectPrivateCA
 
   UiTlsTargetGroup:
@@ -403,7 +413,7 @@ Resources:
       SigningAlgorithm: SHA256WITHRSA
       TemplateArn: arn:aws:acm-pca:::template/RootCACertificate/V1
       Validity:
-        Type: YEARS
+        Type: YEARS # root CA must outlive the certs it signs
         Value: 10
 
   # Activates the CA by installing its own root cert — CA is DISABLED until this exists
@@ -481,10 +491,10 @@ Resources:
             ClientAliases:
               - Port: 80
                 DnsName: ui 
-            Tls:                                                   # <-- Added tls for inbound/outboundencyption
-              IssuerCertificateAuthority:
-                AwsPcaAuthorityArn: !Ref ServiceConnectPrivateCA
-              RoleArn: !GetAtt ServiceConnectCertificateRole.Arn
+            #### Tls:   # <-- make sure not to add this as alb health checks kept failing on me since alb uses http for health check i guess
+            ####   IssuerCertificateAuthority:
+            ####     AwsPcaAuthorityArn: !Ref ServiceConnectPrivateCA
+            ####   RoleArn: !GetAtt ServiceConnectCertificateRole.Arn
                             
       Tags:
         - Key: Name

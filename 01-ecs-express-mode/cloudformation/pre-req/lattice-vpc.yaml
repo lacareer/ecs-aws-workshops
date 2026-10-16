@@ -1,0 +1,206 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Second VPC (lattice-retail-store-vpc) for the ECS Immersion Day VPC Lattice lab.
+
+Resources:
+  # ---------- VPC + Internet Gateway ----------
+  LatticeVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc
+
+  LatticeIgw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc
+
+  LatticeVpcGwAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref LatticeIgw
+      VpcId: !Ref LatticeVpc
+
+  # ---------- Public subnet 1 (AZ a) ----------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: 192.168.0.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref LatticeVpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PublicSubnet1
+
+  PublicSubnet1RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LatticeVpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PublicSubnet1
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnet1RouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet1DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: LatticeVpcGwAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref LatticeIgw
+      RouteTableId: !Ref PublicSubnet1RouteTable
+
+  # Single NAT gateway (in public subnet 1) used by both private subnets
+  NatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PublicSubnet1
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn:
+      - PublicSubnet1DefaultRoute
+      - PublicSubnet1RouteTableAssociation
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PublicSubnet1
+
+  # ---------- Public subnet 2 (AZ b) ----------
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      CidrBlock: 192.168.1.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref LatticeVpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PublicSubnet2
+
+  PublicSubnet2RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LatticeVpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PublicSubnet2
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnet2RouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PublicSubnet2DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: LatticeVpcGwAttachment
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref LatticeIgw
+      RouteTableId: !Ref PublicSubnet2RouteTable
+
+  # ---------- Private subnet 1 (AZ a) ----------
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: 192.168.2.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref LatticeVpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PrivateSubnet1
+
+  PrivateSubnet1RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LatticeVpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PrivateSubnet1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnet1RouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet1DefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+      RouteTableId: !Ref PrivateSubnet1RouteTable
+
+  # ---------- Private subnet 2 (AZ b) ----------
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}b"
+      CidrBlock: 192.168.3.0/24
+      MapPublicIpOnLaunch: false
+      VpcId: !Ref LatticeVpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PrivateSubnet2
+
+  PrivateSubnet2RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LatticeVpc
+      Tags:
+        - Key: Name
+          Value: lattice-retail-store-vpc/PrivateSubnet2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateSubnet2RouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  PrivateSubnet2DefaultRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway       # both private subnets share the single NAT in public subnet 1
+      RouteTableId: !Ref PrivateSubnet2RouteTable
+
+Outputs:
+  VpcBId:
+    Description: Lattice VPC ID
+    Value: !Ref LatticeVpc
+    Export:
+      Name: VpcBId
+  VpcBPublicSubnetAZ1:
+    Value: !Ref PublicSubnet1
+    Export:
+      Name: VpcBPublicSubnetAZ1
+  VpcBPublicSubnetAZ2:
+    Value: !Ref PublicSubnet2
+    Export:
+      Name: VpcBPublicSubnetAZ2
+  VpcBPrivateSubnetAZ1:
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: VpcBPrivateSubnetAZ1
+  VpcBPrivateSubnetAZ2:
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: VpcBPrivateSubnetAZ2
