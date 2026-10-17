@@ -102,6 +102,10 @@ Parameters:
     Default: green
     Description: Theme applied to the retail store UI (RETAIL_UI_THEME).
 
+  CartsServiceDnsName:
+    Type: String
+    Description: VPC Lattice carts-service DNS (from the VPC2 stack output), e.g. carts-service-xxxx.yyyy.vpc-lattice-svcs.<region>.on.aws    
+
 Resources:
 
   ApplicationLoadBalancer:
@@ -301,7 +305,9 @@ Resources:
             - Name: RETAIL_UI_ENDPOINTS_CHECKOUT
               Value: http://checkout
             - Name: RETAIL_UI_ENDPOINTS_CATALOG
-              Value: http://catalog                         
+              Value: http://catalog   
+            - Name: RETAIL_UI_ENDPOINTS_CARTS  # <-- added: reach carts over VPC Lattice (HTTPS)
+              Value: !Sub "https://${CartsServiceDnsName}"                                     
 
   ServiceConnectLogGroup:
     Type: AWS::Logs::LogGroup

@@ -1,8 +1,7 @@
 NOTE THAT THE CART SERVICE WAS NOT DEPLOYED IN THIS MODULE BUT THE CART STILL WORKS
 THERE MUST BE SOMETHING ON THECODE SIDE FOR THIS REASON
 
-REFER TO 01-ecs-express-mode/cloudformation/02-frontend-backend/express-mode.yaml TO SEE CART DDB AND SERVICE DEPLOYMENT
-
+REFER TO 01-ecs-express-mode/cloudformation/02-frontend-backend/express-mode.yaml or 03-ecs-deep-dive/06-networking/03-vpc-lattice TO SEE CART DDB AND SERVICE DEPLOYMENT
 
 # FOR MORE SERVICE CONNECT EXAMPLES,TESTING SERVICE TO SERVICE CONNECTION, AND DIFFERENCE BETWEEN SERVICE CONNECT AND CLOUDMAPS:
 
@@ -28,9 +27,9 @@ Deploy the resource in this order:
 
 2. Wait for item 1 deploment to complete successfully
 
-3. Deploy 02-ecs-3-tier-architecture/02-fe-be-service-connect
+3. Deploy 03-ecs-deep-dive/06-networking/01-service-connect/fe-be-sc.yaml
 
-4. Wait for all the services [ui, order, catalog, checkout, and cart] the deploment to complete successfully
+4. Wait for all the services [ui, order, catalog, checkout] the deploment to complete successfully
 
 5. Once completed, got to the AWS Console and copy the ALB url
 
