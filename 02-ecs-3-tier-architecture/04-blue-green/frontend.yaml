@@ -479,7 +479,7 @@ Resources:
         Strategy: BLUE_GREEN
         BakeTimeInMinutes: 2
         # # I did not use nor test the configuration for the manual-approval Lambda.
-        # # Hence, why ic ommented it out
+        # # Hence, why i commented it out
         # Optional manual-approval hook after test traffic shifts (see note below)
         # LifecycleHooks:
         #   - HookTargetArn: !GetAtt ManualApprovalFunction.Arn

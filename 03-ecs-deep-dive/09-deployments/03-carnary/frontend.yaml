@@ -1,0 +1,423 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "ECS UI service with native CANARY deployment (ALB blue/green target groups)"
+
+Parameters:
+  ClusterName:
+    Type: String
+    Default: retail-store-ecs-cluster
+    Description: Name of the ECS cluster.
+
+  UiServiceName:
+    Type: String
+    Default: ui
+    Description: Name of the ECS UI service.
+
+  UiContainerImage:
+    Type: String
+    Default: public.ecr.aws/aws-containers/retail-store-sample-ui:1.5.0
+    Description: Container image for the retail store UI.
+
+  UiContainerPort:
+    Type: Number
+    Default: 8080
+    Description: Port the application listens on.
+
+  TestListenerPort:
+    Type: Number
+    Default: 8080
+    Description: ALB test listener port used to validate the green revision.
+
+  UiHealthCheckPath:
+    Type: String
+    Default: /actuator/health
+    Description: Health check path exposed by the application.
+
+  Cpu:
+    Type: String
+    Default: 2048
+    Description: CPU units for the ECS task.
+
+  Mem:
+    Type: String
+    Default: 4096
+    Description: Memory units for the ECS task.
+
+  UiTheme:
+    Type: String
+    Default: green
+    Description: UI color theme. Change this (e.g. to "orange") and update the stack to trigger a canary deployment.
+
+  CanaryPercent:
+    Type: Number
+    Default: 25
+    Description: Percentage of production traffic shifted to the green revision during the canary phase.
+
+  CanaryBakeTimeInMinutes:
+    Type: Number
+    Default: 10
+    Description: Minutes to hold the canary split before shifting the remaining traffic to green.
+
+  BakeTimeInMinutes:
+    Type: Number
+    Default: 2
+    Description: Minutes both revisions run after full shift before blue tasks are terminated.
+
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # Load balancer
+  # ---------------------------------------------------------------------------
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: retail-store-alb
+      Scheme: internet-facing
+      Subnets:
+        - !ImportValue VpcAPublicSubnetAZ1
+        - !ImportValue VpcAPublicSubnetAZ2
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the ALB.
+      GroupName: retail-store-alb-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp            # production listener
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp            # test listener for validating the green revision
+          FromPort: !Ref TestListenerPort
+          ToPort: !Ref TestListenerPort
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # Two target groups: ECS registers blue (current) and green (new) revisions here.
+  BlueTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-blue-tg
+      VpcId: !ImportValue VpcAId
+      Port: !Ref UiContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: !Ref UiHealthCheckPath
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  GreenTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: retail-store-ui-green-tg
+      VpcId: !ImportValue VpcAId
+      Port: !Ref UiContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: !Ref UiHealthCheckPath
+      HealthCheckProtocol: HTTP
+      Matcher:
+        HttpCode: "200"
+
+  # Production listener (port 80). Default action is a 503; the explicit rule below
+  # carries all traffic so ECS can weight-shift it between blue and green.
+  ProductionListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        # - Type: fixed-response
+        #   FixedResponseConfig:
+        #     StatusCode: "503"
+        #     ContentType: text/plain
+        #     MessageBody: No routes configured
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100
+              - TargetGroupArn: !Ref GreenTargetGroup
+                Weight: 0            
+
+  ProductionListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref ProductionListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - "/*"
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100
+              - TargetGroupArn: !Ref GreenTargetGroup
+                Weight: 0
+            TargetGroupStickinessConfig:
+              Enabled: true
+              DurationSeconds: 5
+
+  # Test listener (port 8080) to validate green before production traffic shifts.
+  TestListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: !Ref TestListenerPort
+      Protocol: HTTP
+      DefaultActions:
+        # - Type: fixed-response
+        #   FixedResponseConfig:
+        #     StatusCode: "503"
+        #     ContentType: text/plain
+        #     MessageBody: No routes configured
+        # - Type: forward
+        - Type: forward        
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100
+              - TargetGroupArn: !Ref GreenTargetGroup
+                Weight: 0            
+
+  TestListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref TestListener
+      Priority: 1
+      Conditions:
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - "/*"
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref BlueTargetGroup
+                Weight: 100
+              - TargetGroupArn: !Ref GreenTargetGroup
+                Weight: 0
+            TargetGroupStickinessConfig:
+              Enabled: true
+              DurationSeconds: 5
+
+  # ---------------------------------------------------------------------------
+  # ECS infrastructure role that lets ECS modify ALB listener rules during the shift
+  # ---------------------------------------------------------------------------
+  EcsInfrastructureRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: ecsInfrastructureRoleForLoadBalancers
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId   # confused-deputy protection
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers
+      Tags:
+        - Key: Name
+          Value: ecsInfrastructureRoleForLoadBalancers
+
+  # ---------------------------------------------------------------------------
+  # ECS cluster, task roles, task definition, service
+  # ---------------------------------------------------------------------------
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for the UI-facing ECS tasks.
+      GroupName: retail-store-ecs-sg
+      VpcId: !ImportValue VpcAId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  UiLogConfiguration:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: retail-store-ecs-tasks-ui-service
+      RetentionInDays: 7
+
+  RetailStoreEcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: allowCreateTaskLogGroup
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${UiLogConfiguration}:*
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskExecutionRole
+
+  RetailStoreEcsTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: retailStoreEcsTaskRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: retailStoreEcsTaskSessionLogging
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowCloudWatchLogging
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                Resource: !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/ecs/${UiLogConfiguration}:*
+              - Sid: SessionIntoRetailStoreUiTask
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: '*'
+      Tags:
+        - Key: Name
+          Value: retailStoreEcsTaskRole
+
+  UiTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: retail-store-ecs-ui
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: !Ref Cpu
+      Memory: !Ref Mem
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !Ref RetailStoreEcsTaskExecutionRole
+      TaskRoleArn: !Ref RetailStoreEcsTaskRole
+      ContainerDefinitions:
+        - Name: application
+          Image: public.ecr.aws/aws-containers/retail-store-sample-ui:1.2.3
+          Essential: true
+          PortMappings:
+            - Name: application
+              ContainerPort: !Ref UiContainerPort
+              HostPort: !Ref UiContainerPort
+              Protocol: tcp
+              AppProtocol: http
+          LinuxParameters:
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - curl -f http://localhost:8080/actuator/health || exit 1
+            Interval: 10
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+          VersionConsistency: disabled
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref UiLogConfiguration
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ui-service
+          Environment:
+            - Name: RETAIL_UI_THEME
+              Value: !Ref UiTheme
+
+  UiService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ProductionListenerRule
+      - TestListenerRule
+    Properties:
+      ServiceName: !Ref UiServiceName
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref UiTaskDefinition
+      DesiredCount: 2
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 30
+      EnableExecuteCommand: true
+      LoadBalancers:
+        - TargetGroupArn: !Ref BlueTargetGroup          # primary (blue) revision
+          ContainerName: application
+          ContainerPort: !Ref UiContainerPort
+          AdvancedConfiguration:
+            AlternateTargetGroupArn: !Ref GreenTargetGroup
+            ProductionListenerRule: !Ref ProductionListenerRule
+            TestListenerRule: !Ref TestListenerRule
+            RoleArn: !GetAtt EcsInfrastructureRole.Arn
+      DeploymentConfiguration:
+        Strategy: CANARY
+        BakeTimeInMinutes: !Ref BakeTimeInMinutes       # final monitor window before blue cleanup
+        CanaryConfiguration:
+          CanaryPercent: !Ref CanaryPercent             # initial green traffic share
+          CanaryBakeTimeInMinutes: !Ref CanaryBakeTimeInMinutes
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets:
+            - !ImportValue VpcAPrivateSubnetAZ1
+            - !ImportValue VpcAPrivateSubnetAZ2
+          SecurityGroups:
+            - !Ref EcsSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Ref UiServiceName
+
+Outputs:
+  AlbDnsName:
+    Description: ALB DNS name. Port 80 = production, port 8080 = test (green validation).
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
