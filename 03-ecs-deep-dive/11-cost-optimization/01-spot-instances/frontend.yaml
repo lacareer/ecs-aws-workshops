@@ -338,7 +338,9 @@ Resources:
   UiService:
     Type: AWS::ECS::Service
     # Service creation fails if the listener isn't attached to the target group yet
-    DependsOn: AlbHttpListener
+    DependsOn: 
+      - AlbHttpListener
+      - EcsClusterCapacityProviders    
     Properties:
       ServiceName: !Ref UiServiceName
       Cluster: !Ref EcsCluster
